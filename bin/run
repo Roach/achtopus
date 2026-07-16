@@ -39,12 +39,38 @@ Plan schema (see docs/harness.md and the example under examples/):
 The driver never asks an LLM to decide accept/reject or to summarize between
 waves; those are computed from the wire verdict files by code below.
 """
-import argparse, concurrent.futures as cf, fnmatch, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, concurrent.futures as cf, fnmatch, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIRE_DIR = os.path.join(REPO_ROOT, "wire")
 AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
 WIRE = os.path.join(REPO_ROOT, "bin", "wire")
+RUN_STATE_FILE = os.path.join(WIRE_DIR, ".run_state.json")
+
+
+def load_run_state():
+    try:
+        return json.load(open(RUN_STATE_FILE, encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def task_fingerprint(task):
+    """Hash of a task's own content — nothing about run history. Guards idempotent reuse
+    against a stale verdict: if a plan.json is hand-edited (or a --goal is re-authored) so task
+    id "t1" now means different work, the fingerprint won't match and the driver re-runs it
+    instead of silently reusing a verdict for content that no longer exists."""
+    # Exclude runtime-injected keys (_model/_wt/_cwd/_system, set by preflight_roll_call/
+    # process_task) — otherwise the fingerprint saved after a task runs (mutated dict) would
+    # never match the pristine one recomputed from a freshly-loaded plan.json next run,
+    # permanently defeating reuse.
+    visible = {k: v for k, v in task.items() if not k.startswith("_")}
+    return hashlib.sha256(json.dumps(visible, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def save_run_state(state):
+    os.makedirs(WIRE_DIR, exist_ok=True)
+    json.dump(state, open(RUN_STATE_FILE, "w", encoding="utf-8"), indent=2)
 
 
 RUN_LOCK = os.path.join(WIRE_DIR, ".run.lock")
@@ -929,6 +955,10 @@ def main():
                      "may use; a plan's own declared target_repo is untrusted (a hand-authored or "
                      "--goal/conductor-authored plan.json could otherwise point worktree isolation "
                      "at an arbitrary path) and is ignored unless it matches this exactly")
+    ap.add_argument("--fresh", action="store_true", help="opt out of the default idempotent "
+                     "rerun behavior: clears wire/ and re-authors the plan (with --goal) instead "
+                     "of reusing wire/.run_state.json and the last-authored wire/plan.json. Use "
+                     "this for a genuinely new run rather than continuing/retrying a prior one.")
     args = ap.parse_args()
 
     if bool(args.plan) == bool(args.goal):
@@ -944,8 +974,27 @@ def _main_body(args):
     premium_model = args.premium_model or DEFAULT_MODEL
     if args.goal:
         plan_path = os.path.join(WIRE_DIR, "plan.json")
+        goal_path = os.path.join(WIRE_DIR, ".last_goal.txt")
         os.makedirs(WIRE_DIR, exist_ok=True)
-        plan = author_plan(args.goal, plan_path, premium_model, args.budget, args.target_repo)
+        try:
+            last_goal = open(goal_path, encoding="utf-8").read()
+        except FileNotFoundError:
+            last_goal = None
+        goal_changed = last_goal is not None and last_goal != args.goal
+        if goal_changed and not args.fresh:
+            log("idempotent: --goal text differs from the last run's goal — re-authoring "
+                "the plan instead of silently reusing the stale one")
+        if not args.fresh and not goal_changed and os.path.exists(plan_path):
+            # Reuse the plan a prior --goal run already authored, rather than re-invoking the
+            # conductor — a fresh conductor call isn't guaranteed to assign the same task ids to
+            # the same work, which would silently break matching against wire/.run_state.json.
+            log(f"idempotent: reusing previously-authored {plan_path} instead of re-authoring")
+            plan = validate_plan(json.load(open(plan_path, encoding="utf-8")))
+            if args.budget is not None:
+                plan["budget_usd"] = args.budget
+        else:
+            plan = author_plan(args.goal, plan_path, premium_model, args.budget, args.target_repo)
+            open(goal_path, "w", encoding="utf-8").write(args.goal)
     else:
         plan = validate_plan(json.load(open(args.plan, encoding="utf-8")))
         if args.budget is not None:
@@ -995,24 +1044,52 @@ def _main_body(args):
     spend = {"usd": 0.0}
     tasks = plan["tasks"]
 
+    # Idempotent reruns keep wire/ (a fresh `clear` would archive away the very artifacts a
+    # reused "accepted" task's downstream readers/synthesis need) and skip real dispatch for any
+    # task already recorded accepted/rejected — those already spent real budget on a real verdict.
+    # budget-skipped/dep-skipped/scope-blocked tasks are NOT reused (nothing actually ran) and
+    # dispatch normally — this is exactly what lets "rerun at a higher --budget" finish the tasks
+    # a too-small prior run's governor cut off, without re-paying for work already accepted.
+    prior_state = {} if (args.fresh or args.dry_run) else load_run_state()
+    task_by_id = {t["id"]: t for t in tasks}
+    already_resolved = {tid: r for tid, r in prior_state.items()
+                         if r.get("outcome") in ("accepted", "rejected")
+                         and tid in task_by_id
+                         and r.get("fingerprint") == task_fingerprint(task_by_id[tid])}
+    stale = {tid for tid, r in prior_state.items()
+             if r.get("outcome") in ("accepted", "rejected") and tid in task_by_id
+             and r.get("fingerprint") != task_fingerprint(task_by_id[tid])}
+    if stale:
+        log(f"idempotent: {len(stale)} previously-resolved task(s) changed content since their "
+            f"last verdict ({', '.join(sorted(stale))}) — re-running instead of reusing stale state")
+    tasks_to_run = [t for t in tasks if t["id"] not in already_resolved]
+    if already_resolved:
+        log(f"idempotent: reusing {len(already_resolved)} already-resolved task(s) "
+            f"({', '.join(sorted(already_resolved))}); {len(tasks_to_run)} will run")
+
     # `clear` (not `init`) so each run starts from a fresh manifest: bin/run has no
     # resume-from-manifest logic — every task in the plan dispatches fresh every time — so an
     # `init`-only manifest would silently accumulate/collide with a prior run's same-named task
     # ids (t1.result.md etc. overwritten in place). `clear` archives the prior run's full file
     # set into wire/_archive/<timestamp>/ first, namespacing each run by its own archive folder.
-    subprocess.run([WIRE, "clear"], cwd=REPO_ROOT, check=False, capture_output=True)
+    # Idempotent mode (the default) skips this: reused tasks' wire/<id>.result.md artifacts
+    # must survive. --fresh opts back into always clearing for a genuinely new run. --dry-run
+    # always clears too — it never writes wire/.run_state.json (a dry run isn't real reusable
+    # work), so without a clear here the manifest would still accumulate claims across repeated
+    # dry runs with nothing to reuse for it, just noisy "already accepted" reclaim warnings.
+    if args.fresh or args.dry_run:
+        subprocess.run([WIRE, "clear"], cwd=REPO_ROOT, check=False, capture_output=True)
     log(f"{len(tasks)} tasks, budget ${budget:.2f}, "
         f"{'DRY-RUN' if args.dry_run else 'LIVE'}, concurrency {args.concurrency}")
 
-    # Roll call ALL tasks up front, regardless of dependency order, and hold real dispatch
-    # until every one comes back clean (an automatic go/no-go, not a human-approval pause) —
-    # this is a whole-run gate, so it aborts the run entirely on any genuine mismatch rather
-    # than skipping just the offending task.
-    spend["usd"] += preflight_roll_call(tasks, plan, args.dry_run, args.concurrency)
+    # Roll call only the tasks that will actually (re)run — an already-resolved task doesn't
+    # need re-confirming, and preflighting it would waste real money on a no-op check.
+    spend["usd"] += preflight_roll_call(tasks_to_run, plan, args.dry_run, args.concurrency)
 
     import threading
     lock = threading.Lock()
-    results = []
+    results = [{"id": tid, "outcome": r["outcome"], "reason": r.get("reason"), "cost": 0.0}
+               for tid, r in already_resolved.items()]
     all_ids = {t["id"] for t in tasks}
     deps = {t["id"]: set(t.get("depends_on", [])) | infer_deps(t, all_ids) for t in tasks}
 
@@ -1020,8 +1097,8 @@ def _main_body(args):
     # drain to "unresolved/circular dependency" once the dispatch loop empties — indistinguishable
     # from a budget/timing skip, giving no signal that the plan itself is structurally broken.
     # Fail loudly here instead, before any real work (or roll-call spend) is wasted chasing it.
-    unresolved = set(deps)
-    resolved = set()
+    unresolved = set(deps) - set(already_resolved)
+    resolved = set(already_resolved)
     while True:
         ready = {tid for tid in unresolved if deps[tid] <= resolved}
         if not ready:
@@ -1038,8 +1115,8 @@ def _main_body(args):
     for tid, d in deps.items():
         if d:
             log(f"{tid}: depends on {sorted(d)} — dispatch held until they finish")
-    pending = {t["id"]: t for t in tasks}
-    done_ids = set()
+    pending = {t["id"]: t for t in tasks_to_run}
+    done_ids = set(already_resolved)
     with cf.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         in_flight = {}
 
@@ -1075,6 +1152,17 @@ def _main_body(args):
             if t.get("_wt"):
                 remove_worktree(plan["target_repo"], t["_wt"])
                 t["_wt"] = None
+
+    # Persist outcomes for the next idempotent rerun. Only accepted/rejected are ever reused
+    # (see already_resolved above) — recording the rest too is harmless and keeps the file a
+    # complete picture of the last attempt at each task.
+    if not args.dry_run:
+        for r in results:
+            entry = {"outcome": r["outcome"], "reason": r.get("reason")}
+            if r["id"] in task_by_id:
+                entry["fingerprint"] = task_fingerprint(task_by_id[r["id"]])
+            prior_state[r["id"]] = entry
+        save_run_state(prior_state)
 
     # Synthesis: the ONE genuinely-LLM coordination step, run once on accepted work.
     accepted = [r for r in results if r["outcome"] == "accepted"]
