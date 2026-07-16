@@ -13,6 +13,9 @@ whole review is the octopus's eight arms coordinating through a shared, greppabl
 **wire**, so a human can always reconstruct what was checked, what was challenged, and why the
 gate opened or held.
 
+<img width="700" alt="achtopus" src="https://github.com/user-attachments/assets/08a7c493-c86a-48cb-8fc4-de3430355274" />
+
+
 ## Why a PRR needs this
 
 A production readiness review is only as good as the honesty of its checks, and the usual
