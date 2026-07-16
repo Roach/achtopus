@@ -124,8 +124,16 @@ agent's `total_cost_usd`, and does the coordination in code:
 - **Board ownership** — only the driver writes the board (`bin/bus status`); agents write
   their own artifact to an absolute bus path and do no coordination.
 
+- **Plan authoring is the only coordination LLM call.** `bin/run --goal "<what to do>"`
+  spawns the `conductor` once to author `bus/plan.json` (against a strict, driver-injected
+  JSON contract — surface inventory, right-sized verify, a budget from its projection), then
+  validates and executes it deterministically. Everything after the plan is code. This closes
+  the loop: the expensive 173-turn narrating conductor is replaced by a single plan-authoring
+  call plus one scribe synthesis. Malformed plans are rejected up front by `validate_plan()`
+  (unknown persona, dup id, bad verify mode), never mid-run.
+
 Run `bin/run examples/plan.example.json --dry-run` to exercise the whole control flow
-(accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost. The
-live path needs the local `claude` CLI. Remaining work before this is production: stream
-per-wave progress, persist a machine-readable run ledger, and let the `conductor` persona
-emit `plan.json` directly so plan-authoring is the only LLM step on the coordination side.
+(accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost, or
+`bin/run --goal "<task>" --dry-run` to have the conductor author a real plan and then
+simulate its execution for free. The live path needs the local `claude` CLI. Remaining work
+before production: stream per-wave progress and persist a machine-readable run ledger.

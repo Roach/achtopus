@@ -9,7 +9,11 @@ growing narration context being re-billed every turn, which is the ~22%-of-run
 conductor cost that docs/harness.md diagnoses.
 
 Usage:
-    bin/run <plan.json> [--dry-run] [--concurrency N] [--verbose]
+    bin/run <plan.json> [--dry-run] [--concurrency N]
+    bin/run --goal "<what to do>" [--budget 5.00] [--dry-run]   # conductor authors the plan
+
+In --goal mode the ONLY LLM coordination call is the conductor authoring bus/plan.json;
+everything after (fan-out, budget, gating, synthesis) is deterministic code.
 
 Plan schema (see docs/harness.md and the example under examples/):
     {
@@ -35,6 +39,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUS_DIR = os.path.join(REPO_ROOT, "bus")
 AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
 BUS = os.path.join(REPO_ROOT, "bin", "bus")
+
+
+VALID_PERSONAS = {"conductor", "composer", "luthier", "soloist", "critic",
+                  "tuner", "heckler", "scribe"}
 
 
 def log(msg):
@@ -234,14 +242,93 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             remove_worktree(plan["target_repo"], wt)
 
 
+# ---- plan validation: a malformed plan fails loudly, never mid-run ------------
+
+def validate_plan(plan):
+    if not isinstance(plan, dict) or not isinstance(plan.get("tasks"), list) or not plan["tasks"]:
+        raise ValueError("plan must be an object with a non-empty 'tasks' array")
+    seen = set()
+    for i, t in enumerate(plan["tasks"]):
+        where = f"tasks[{i}]"
+        tid = t.get("id")
+        if not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", tid or ""):
+            raise ValueError(f"{where}: 'id' must match [A-Za-z0-9_-]+ (got {tid!r})")
+        if tid in seen:
+            raise ValueError(f"{where}: duplicate id {tid!r}")
+        seen.add(tid)
+        if t.get("persona") not in VALID_PERSONAS:
+            raise ValueError(f"{where}: 'persona' must be one of {sorted(VALID_PERSONAS)}")
+        if not isinstance(t.get("prompt"), str) or not t["prompt"].strip():
+            raise ValueError(f"{where}: 'prompt' must be a non-empty string")
+        if t.get("verify", "pair") not in VERIFY_PLANS:
+            raise ValueError(f"{where}: 'verify' must be one of {sorted(VERIFY_PLANS)}")
+    return plan
+
+
+# ---- --goal mode: the ONE LLM coordination call authors the plan ---------------
+
+PLAN_CONTRACT = """
+
+## Deterministic-driver mode (you are authoring a plan, not running it)
+Emit a machine-readable plan to the ABSOLUTE path `{plan_path}` and NOTHING to the board.
+Write ONE JSON object, no prose around it, matching exactly:
+  {{"budget_usd": <float>, "est_agent_usd": <float>, "default_model": "<model-id>",
+    "target_repo": "<abs path or omit>",
+    "tasks": [{{"id":"t1","persona":"soloist","prompt":"<self-contained task>",
+               "verify":"none|single|pair|quorum3|quorum5","model":"<optional override>",
+               "isolate": true}}]}}
+Rules you must honor while authoring:
+- Do your step 1a surface inventory FIRST: list the surfaces the goal spans and give each an
+  owning task. A surface with no task is how real defects slip — cover it or omit it deliberately.
+- Right-size verify: default `single`; use `pair`/`quorum3` ONLY on the 2-3 riskiest claims.
+  Don't add voters to low-stakes or already-clean checks.
+- Set `budget_usd` from your step 1b projection (agents x turns x context), not agent count.
+- personas available: {personas}. Ids must be unique and match [A-Za-z0-9_-]+.
+Return only after the file is written and is valid JSON.
+"""
+
+
+def author_plan(goal, plan_path, model, budget):
+    log("conductor authoring plan.json (the single coordination LLM call)")
+    contract = PLAN_CONTRACT.format(plan_path=plan_path, personas=sorted(VALID_PERSONAS))
+    system = persona_body("conductor") + contract
+    cmd = ["claude", "-p", goal, "--append-system-prompt", system,
+           "--output-format", "json", "--model", model,
+           "--permission-mode", "acceptEdits", "--add-dir", BUS_DIR]
+    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    try:
+        cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
+        log(f"conductor done (${cost:.3f})")
+    except Exception:
+        log(f"conductor call did not return parseable JSON (exit {proc.returncode})")
+    if not os.path.exists(plan_path):
+        sys.exit("conductor did not write a plan.json — aborting")
+    plan = validate_plan(json.load(open(plan_path, encoding="utf-8")))
+    if budget is not None:
+        plan["budget_usd"] = budget      # CLI override wins over the conductor's estimate
+    return plan
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("plan")
+    ap.add_argument("plan", nargs="?", help="path to a plan.json (or use --goal)")
+    ap.add_argument("--goal", help="have the conductor author the plan from this goal")
+    ap.add_argument("--budget", type=float, help="override budget_usd")
     ap.add_argument("--dry-run", action="store_true", help="stub agents; test orchestration free")
     ap.add_argument("--concurrency", type=int, default=6)
     args = ap.parse_args()
 
-    plan = json.load(open(args.plan, encoding="utf-8"))
+    if bool(args.plan) == bool(args.goal):
+        ap.error("provide exactly one of <plan.json> or --goal")
+    if args.goal:
+        plan_path = os.path.join(BUS_DIR, "plan.json")
+        os.makedirs(BUS_DIR, exist_ok=True)
+        plan = author_plan(args.goal, plan_path,
+                           "claude-opus-4-8", args.budget)
+    else:
+        plan = validate_plan(json.load(open(args.plan, encoding="utf-8")))
+        if args.budget is not None:
+            plan["budget_usd"] = args.budget
     budget = float(plan.get("budget_usd", 1e9))
     spend = {"usd": 0.0}
     tasks = plan["tasks"]
