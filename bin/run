@@ -166,6 +166,18 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         f"absolute path `{artifact}`. Do NOT edit wire/manifest.md or run bin/wire — the driver records "
         f"all state. Coordinate only through files under `{WIRE_DIR}`."
     )
+    if cwd != REPO_ROOT:
+        # cwd here is either the shared target_repo or a worktree isolated from it — either way
+        # it's already a local, checked-out copy. A task's own prompt may still say "clone" or
+        # "fetch" out of habit (e.g. a conductor-authored prompt written before this repo access
+        # was wired up) — override that explicitly so agents don't burn time/egress re-fetching
+        # something already sitting in their own working directory.
+        system += (
+            f"\n\nYour working directory `{cwd}` is ALREADY a local checkout of the target "
+            f"repo — do not `git clone`, `git fetch` from a remote, or use `gh` to re-fetch "
+            f"anything you can already read/run locally (`git diff`, `git log`, `git show`, "
+            f"reading files, running tests) from this directory as-is."
+        )
     cmd = ["claude", "-p", prompt,
            "--append-system-prompt", system,
            "--output-format", "json",
@@ -646,7 +658,7 @@ CONDUCTOR_CAP_USD = 1.00   # the plan-authoring call is supposed to be cheap —
                            # $5.31 with no output because nothing capped it.
 
 
-def author_plan(goal, plan_path, model, budget):
+def author_plan(goal, plan_path, model, budget, target_repo=None):
     log("conductor authoring plan.json (the single coordination LLM call)")
     contract = PLAN_CONTRACT.format(plan_path=plan_path, personas=sorted(VALID_PERSONAS))
     system = persona_body("conductor") + contract
@@ -658,6 +670,22 @@ def author_plan(goal, plan_path, model, budget):
     prompt = (f"Do not perform this task yourself. Author a plan.json for OTHER agents to "
               f"perform it, per the Deterministic-driver mode section of your system prompt. "
               f"The task to plan for: {goal}")
+    if target_repo:
+        # Without this, the conductor has no way to know a local checkout exists at all — it was
+        # seen authoring tasks that told agents to fetch the diff over the network (gh/clone),
+        # which fails in sandboxes with no egress, when a local git checkout was sitting right
+        # there the whole time. Every task that needs to read/run against the repo MUST set
+        # "isolate": true (and "target_repo" matching this path) so the driver worktree-isolates
+        # it with cwd + --add-dir pointed at the real checkout instead of the achtopus repo.
+        prompt += (
+            f"\n\nA local git checkout of the target repo is already available at "
+            f"`{target_repo}` — you MUST set `\"target_repo\": \"{target_repo}\"` at the top "
+            f"level of the plan, and set `\"isolate\": true` on every task that needs to read "
+            f"the diff, run commands, or inspect files in that repo. Do NOT write tasks that "
+            f"rely on network access (gh CLI, git clone, curl) to reach the repo or its PR — "
+            f"assume no network egress and ground everything through the local isolated "
+            f"checkout instead."
+        )
     cmd = ["claude", "-p", prompt, "--append-system-prompt", system,
            "--output-format", "json", "--model", model,
            "--permission-mode", "acceptEdits", "--add-dir", WIRE_DIR,
@@ -715,7 +743,7 @@ def _main_body(args):
     if args.goal:
         plan_path = os.path.join(WIRE_DIR, "plan.json")
         os.makedirs(WIRE_DIR, exist_ok=True)
-        plan = author_plan(args.goal, plan_path, premium_model, args.budget)
+        plan = author_plan(args.goal, plan_path, premium_model, args.budget, args.target_repo)
     else:
         plan = validate_plan(json.load(open(args.plan, encoding="utf-8")))
         if args.budget is not None:
@@ -732,6 +760,35 @@ def _main_body(args):
                 f"--target-repo{' (not supplied)' if not args.target_repo else ''} — "
                 f"ignoring it; worktree isolation is disabled for this run")
             plan["target_repo"] = None
+    elif args.target_repo:
+        # The plan omitted target_repo entirely — e.g. a --goal/conductor-authored plan that
+        # didn't wire it in. The CLI flag is still the trusted source of truth: use it directly
+        # rather than silently running with no repo access at all (root cause of a real run
+        # where every task fell back to network calls that don't exist in this sandbox, cascading
+        # into rejected verdicts across the board instead of failing fast).
+        plan["target_repo"] = args.target_repo
+
+    isolating_tasks = any(t.get("isolate") for t in plan["tasks"])
+    if args.target_repo and not isolating_tasks:
+        # A target_repo was supplied but not one task actually asked to be isolated into it —
+        # every task's cwd would stay at the achtopus repo with no visibility into the real
+        # checkout, and would predictably fail to ground itself. Bail now instead of spending
+        # the budget on tasks that can't do their job — this is the failure mode from a live
+        # run where the conductor's plan never used --target-repo at all.
+        sys.exit(f"--target-repo {args.target_repo!r} was supplied but no task in the plan sets "
+                 f"\"isolate\": true — every task would run with no access to that repo and no "
+                 f"network fallback. Aborting before spending budget on a run that can't ground "
+                 f"itself; re-author the plan so at least one task isolates into the target repo.")
+    if isolating_tasks and not plan.get("target_repo"):
+        # The mismatched-target_repo branch above can drop plan["target_repo"] to None while
+        # tasks still declare isolate: true — the bail check above wouldn't catch this (a task
+        # DOES isolate), but make_worktree() never runs without a plan-level target_repo (it's
+        # guarded on plan.get("target_repo") in process_task), so those tasks would silently run
+        # at the achtopus repo with no isolation anyway. Same failure mode, different door — bail
+        # here too rather than let it happen quietly.
+        sys.exit(f"plan declares isolate: true tasks but has no usable target_repo (either none "
+                 f"was set, or it didn't match --target-repo{'' if args.target_repo else ' — none was supplied on the CLI either'}). "
+                 f"Aborting before spending budget on tasks that would run with no repo access.")
     budget = float(plan.get("budget_usd", 1e9))
     spend = {"usd": 0.0}
     tasks = plan["tasks"]
