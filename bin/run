@@ -178,11 +178,28 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         cmd += ["--max-budget-usd", f"{max(max_usd, 0.01):.2f}"]
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     cost = 0.0
+    parsed = None
     try:
-        cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
+        parsed = json.loads(proc.stdout)
+        cost = float(parsed.get("total_cost_usd", 0.0))
     except Exception:
         _log_failure(task_id, proc)
-    return (cost, os.path.exists(artifact))
+    ok = os.path.exists(artifact)
+    # A real spend with no artifact is still a failure needing a diagnostic trail — don't
+    # rely solely on the JSON-parse-exception path above, which never fires when the call
+    # succeeds cleanly but the agent just didn't write its file (e.g. it hit max turns, was
+    # denied a permission, or replied in prose instead of writing). Parse failures already
+    # got their trail from _log_failure in the except block above; only log here for the
+    # complementary case (parsed fine, no artifact) to avoid double-logging the same call.
+    if not ok and parsed is not None:
+        log(f"{task_id}: claude call succeeded (${cost:.3f}) but wrote no artifact at {artifact}")
+        result_text = str(parsed.get("result", ""))[:800]
+        if result_text:
+            log(f"{task_id} result (truncated): {result_text}")
+        subtype = parsed.get("subtype")
+        if subtype and subtype != "success":
+            log(f"{task_id}: subtype={subtype}")
+    return (cost, ok)
 
 
 # ---- worktree isolation: handed to the agent, not left to a prose rule ---------
