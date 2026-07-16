@@ -666,11 +666,19 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         return {"id": tid, "outcome": "scope-blocked", "reason": scope_reason, "cost": 0.0}
 
     # Budget governor — a HARD refusal, the thing prose never enforced.
+    # Reserve `est` atomically with the check (not just check-then-later-add-actual-cost):
+    # with concurrency > 1, several tasks can each check spend["usd"] against a still-stale
+    # value (none of the others' real cost has landed yet) and all pass, then all spend their
+    # real cost, overshooting budget by however many tasks were admitted in that window (seen
+    # live: a $20 cap ran to $22.29 because 2-3 tasks were admitted concurrently off the same
+    # stale spend snapshot). Reserving immediately makes each admission visible to the next
+    # concurrent check; the reservation is reconciled against the real cost once known.
     with lock:
         if spend["usd"] + est > budget:
             log(f"{tid}: SKIPPED — budget governor ({spend['usd']:.2f}+{est:.2f} > {budget:.2f})")
             wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "budget-skipped", "cost": 0.0}
+        spend["usd"] += est
 
     # cwd/worktree/system were already resolved by preflight_roll_call() (dry runs skip it, so
     # these keys are absent and we fall back to the old defaults). Its roll-call cost is
@@ -685,10 +693,17 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         dry = {"body": f"{tid} result (dry-run stub)\n", "cost": 0.05} if dry_run else None
         with lock:
             headroom = max(budget - spend["usd"], est)
-        cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry,
-                              max_usd=headroom, precomputed=precomputed)
+        try:
+            cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry,
+                                  max_usd=headroom, precomputed=precomputed)
+        except Exception:
+            # An exception here (not a normal ok=False) means the reservation below would never
+            # get reconciled, permanently inflating spend["usd"] — undo it before propagating.
+            with lock:
+                spend["usd"] -= est
+            raise
         with lock:
-            spend["usd"] += cost
+            spend["usd"] += cost - est   # reconcile: replace the reservation with the real cost
         if not ok:
             wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "no-result", "cost": cost}
@@ -699,12 +714,18 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         coverage_note = ""
         with lock:
             room = spend["usd"] + est <= budget
-        if room:
-            with lock:
+            if room:
+                spend["usd"] += est          # reserve atomically with the check — see note above
                 ccap = max(budget - spend["usd"], est)
-            ccost, gap, coverage_note = run_coverage_gate(task, model, dry_run, max_usd=ccap)
+        if room:
+            try:
+                ccost, gap, coverage_note = run_coverage_gate(task, model, dry_run, max_usd=ccap)
+            except Exception:
+                with lock:
+                    spend["usd"] -= est
+                raise
             with lock:
-                spend["usd"] += ccost
+                spend["usd"] += ccost - est  # reconcile reservation against real cost
             if gap:
                 log(f"{tid}: critic coverage gate flagged a gap — {coverage_note}")
         else:
@@ -719,6 +740,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                     log(f"{tid}: verify {persona} SKIPPED — budget governor")
                     verdicts.append((kind, "INCONCLUSIVE", None))
                     continue
+                spend["usd"] += est   # reserve atomically with the check — see note above
             suffix = "verdict.md" if kind == "confirm" else "refute.md"
             label = f"{tid}.v{i}"
             vprompt = (f"Verify this claim from wire/{tid}.result.md. "
@@ -749,9 +771,14 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             # isolated elsewhere. Seen live: an isolated task produced a good result, but its
             # tuner verdict came back INCONCLUSIVE because it had no filesystem access to the
             # repo it was asked to independently re-derive facts from.
-            vcost, vok = run_agent(persona, vprompt, label, suffix, model, cwd, dry, max_usd=vcap)
+            try:
+                vcost, vok = run_agent(persona, vprompt, label, suffix, model, cwd, dry, max_usd=vcap)
+            except Exception:
+                with lock:
+                    spend["usd"] -= est
+                raise
             with lock:
-                spend["usd"] += vcost
+                spend["usd"] += vcost - est   # reconcile reservation against real cost
             text = ""
             vpath = os.path.join(WIRE_DIR, f"{label}.{suffix}")
             if os.path.exists(vpath):
