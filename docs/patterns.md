@@ -94,10 +94,12 @@ Levers, roughly in order of impact:
   high-consequence work. Low-stakes tasks want a single soloist, or a soloist + one
   verifier, or no separate verify at all. The conductor sizes this per task — don't
   reflexively fan out a triad for everything.
-- **Pick the subagent model tier deliberately.** In the measured session the *subagent*
-  tier was the larger share of cost, with subagents on the cheaper Sonnet tier and the
-  orchestrator on Opus — a sensible split. Run soloists and verifiers on a cheaper model
-  and reserve the top tier for the orchestrator and the hardest verify/judge steps.
+- **Pick the subagent model tier deliberately.** The subagent tier is where the agent
+  count — and therefore most of the cost — lives, so the model you run subagents on is the
+  biggest single dial. Running every soloist and verifier at the top tier (as some runs
+  have) is the expensive default; consider a cheaper tier for routine soloists and
+  verifiers and reserve the top tier for the orchestrator and the hardest verify/judge
+  steps. This is a lever to set deliberately per run, not a fixed prescription.
 - **Dedup before you fan out.** Overlapping task scopes pay two agents to cover the same
   code and then cost you a manual reconcile. The conductor's pre-fanout overlap check
   (step 1a) exists to avoid this.
