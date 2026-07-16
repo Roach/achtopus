@@ -207,11 +207,38 @@ case "$cmd" in
     dest="$WIRE/_archive/$(stamp)"
     mkdir -p "$dest"
     shopt -s nullglob
+    # *.md covers manifest/result/verdict/refute/coverage. plan.json/.run_state.json/.run.lock
+    # are deliberately NOT swept — those persist across runs on purpose for idempotent reruns.
     for f in "$WIRE"/*.md; do
       [ "$(basename "$f")" = "manifest.md" ] && cp "$f" "$dest/" || mv "$f" "$dest/"
     done
+    # cache/ (bin/cache's librarian store: diff.patch, pr.json, repro outputs, ...) is the same
+    # per-run lifecycle as the .md artifacts above, just not markdown and not a fixed filename
+    # list — move the whole directory in one shot so a stale cache from a PRIOR, unrelated run
+    # (a different repo/PR) never survives a `clear` and gets read as current by the next run.
+    if [ -d "$WIRE/cache" ] && [ -n "$(ls -A "$WIRE/cache" 2>/dev/null)" ]; then
+      mv "$WIRE/cache" "$dest/cache"
+    fi
+    mkdir -p "$WIRE/cache"
     rm -f "$MANIFEST"
     ensure_manifest
+    # Retention: each `clear` writes a NEW _archive/<stamp>/ and nothing ever removed an old
+    # one — harmless when archives held only small .md verdicts, but diff.patch is now archived
+    # too (a real PR's diff can run hundreds of KB), and repeated runs against the same
+    # long-lived repo (this framework's own dogfooding included) accumulate archives forever.
+    # Keep the most recent ACHT_ARCHIVE_KEEP (default 20) archive dirs; prune the rest. A count
+    # cap, not an age cap — "how many runs of history to keep" is a stable, predictable budget
+    # regardless of how often `clear` is invoked.
+    keep="${ACHT_ARCHIVE_KEEP:-20}"
+    archive_root="$WIRE/_archive"
+    if [ -d "$archive_root" ]; then
+      pruned=0
+      while IFS= read -r old; do
+        rm -rf "$old"
+        pruned=$((pruned + 1))
+      done < <(ls -1dt "$archive_root"/*/ 2>/dev/null | tail -n +"$((keep + 1))")
+      [ "$pruned" -gt 0 ] && echo "pruned $pruned archive(s) beyond the last $keep (set ACHT_ARCHIVE_KEEP to change)"
+    fi
     unlock; trap - EXIT
     echo "archived prior wire into $dest; fresh manifest ready"
     ;;

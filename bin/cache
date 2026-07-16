@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""
+Achtopus — cache clerk CLI. The "librarian" every persona asks before re-fetching anything:
+a canonical get/set/fetch/list/rm over wire/cache/, addressed by a stable key (see
+bin/_cache_lib.py for the storage contract and why this exists).
+
+Usage:
+    bin/cache get   <key>                # print cached bytes; exit 1 silently on a miss
+    bin/cache has   <key>                # exit 0 if cached, 1 if not; no output
+    bin/cache set   <key> [file]         # store content under <key>; reads stdin if no file
+    bin/cache fetch <key> -- <command...>  # get if cached; else RUN <command>, cache stdout,
+                                          # print it. THE primitive: "don't re-run a fetch you
+                                          # (or a peer task) already paid for" becomes one call
+                                          # instead of a convention every prompt has to restate.
+    bin/cache list                       # key, size, age for everything cached this run
+    bin/cache rm    <key>                # remove one entry
+
+Examples:
+    bin/cache fetch diff.patch -- git diff origin/main...HEAD
+    bin/cache get pr.json
+    bin/cache fetch repro-t7 -- npx jest src/spam/detector.test.ts -t "homoglyph"
+"""
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cache_lib as cache  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WIRE_DIR = os.environ.get("ACHT_WIRE", os.path.join(ROOT, "wire"))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("get"); p.add_argument("key")
+    p = sub.add_parser("has"); p.add_argument("key")
+    p = sub.add_parser("set"); p.add_argument("key"); p.add_argument("file", nargs="?")
+    p = sub.add_parser("fetch"); p.add_argument("key"); p.add_argument("argv", nargs=argparse.REMAINDER)
+    sub.add_parser("list")
+    p = sub.add_parser("rm"); p.add_argument("key")
+
+    args = ap.parse_args()
+
+    if args.cmd == "get":
+        data = cache.get_bytes(WIRE_DIR, args.key)
+        if data is None:
+            sys.exit(1)
+        sys.stdout.buffer.write(data)
+
+    elif args.cmd == "has":
+        sys.exit(0 if cache.has(WIRE_DIR, args.key) else 1)
+
+    elif args.cmd == "set":
+        if args.file:
+            with open(args.file, "rb") as f:
+                data = f.read()
+        else:
+            data = sys.stdin.buffer.read()
+        p = cache.set_bytes(WIRE_DIR, args.key, data)
+        print(f"cached: {args.key} ({len(data)} bytes) -> {p}", file=sys.stderr)
+
+    elif args.cmd == "fetch":
+        argv = args.argv
+        if argv and argv[0] == "--":
+            argv = argv[1:]
+        if not argv:
+            ap.error("fetch requires a command after '--': bin/cache fetch <key> -- <command...>")
+        try:
+            data, hit = cache.fetch(WIRE_DIR, args.key, argv, cwd=os.getcwd())
+        except subprocess.CalledProcessError as e:
+            sys.stderr.write((e.stderr or b"").decode("utf-8", errors="replace"))
+            sys.exit(e.returncode or 1)
+        print(f"cache {'hit' if hit else 'miss'}: {args.key}"
+              + ("" if hit else f" — ran: {' '.join(argv)}"), file=sys.stderr)
+        sys.stdout.buffer.write(data)
+
+    elif args.cmd == "list":
+        entries = cache.list_entries(WIRE_DIR)
+        if not entries:
+            print("(cache empty)")
+        for name, size, mtime in entries:
+            age_s = max(0, time.time() - mtime)
+            print(f"{name:<40} {size:>10} bytes   {age_s:>6.0f}s old")
+
+    elif args.cmd == "rm":
+        removed = cache.remove(WIRE_DIR, args.key)
+        print(f"{'removed' if removed else 'not found'}: {args.key}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

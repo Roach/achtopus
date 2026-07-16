@@ -36,7 +36,7 @@ be a bottleneck. The manifest is the whole coordination surface.
 **Personas:** 🧭 composer → 🔦/🔧 soloist/luthier → 🧐 critic (→ ✊ tuner)
 
 ```
-composer: PRD/diff → ONE wire/context.md (shared grounding, read by every other arm)
+composer: PRD/diff → ONE wire/context.md (shared grounding) + wire/cache/diff.patch (raw diff) + wire/cache/pr.json (raw PR metadata, if fetched)
 soloist/luthier: do the domain's work (review end-to-end, or exercise it hands-on) → wire/<id>.result.md
 critic:   coverage-gate the result against its domain's rubric → wire/<id>.coverage.md
 tuner/heckler: verify the underlying claims → wire/<id>.verdict.md / .refute.md
@@ -44,7 +44,14 @@ tuner/heckler: verify the underlying claims → wire/<id>.verdict.md / .refute.m
 
 The composer runs once, first, before any domain reviewer starts — it is not a per-item
 stage, it is the shared brief that lets every downstream stage skip re-deriving the same
-PRD read and `git diff`. The critic's coverage check is a gate on *completeness*
+PRD read and `git diff`. Note the brief (`wire/context.md`) is a *summary* of what changed;
+the actual patch text and PR metadata each downstream arm needs to cite line numbers from are
+cached separately as raw bytes (`wire/cache/diff.patch`, `wire/cache/pr.json`, managed via
+`bin/cache get/set/fetch`) precisely so no arm has to re-run `git diff`/`gh pr view` to get its
+own copy of content that's identical across all of them — a summary alone doesn't stop that
+re-fetch, since a citing reviewer still needs the literal diff. The driver itself precomputes
+`diff.patch`/`changed-files.txt`/`pr.json` at $0.00 before any agent is spawned, whenever the
+plan sets `base_ref` — the composer only fetches what the driver didn't already cache. The critic's coverage check is a gate on *completeness*
 (did the domain answer every rubric question), separate from the tuner/heckler's gate on
 *correctness* (is each answer actually true) — both must clear before synthesis.
 

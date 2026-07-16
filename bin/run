@@ -41,6 +41,9 @@ waves; those are computed from the wire verdict files by code below.
 """
 import argparse, concurrent.futures as cf, fnmatch, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cache_lib as cache  # noqa: E402  — the librarian's storage primitives (get/set/fetch)
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIRE_DIR = os.path.join(REPO_ROOT, "wire")
 AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
@@ -149,14 +152,86 @@ def wire_state(task_id, role, state):
 
 
 def context_brief_note():
-    """If the composer (the Surveyor arm) has written the shared grounding brief to
-    wire/context.md for this run, point the caller at it instead of re-deriving the same
-    PRD read / diff — reuse the existing wire mechanism, don't invent a new one. Empty
-    string (no-op) when no brief exists for this run."""
+    """Point the caller at whatever shared-context cache entries already exist for this run —
+    written either by the driver's own zero-LLM-cost precompute_context_cache() (see below) or
+    by the composer — so every task reuses them instead of re-deriving/re-fetching the same
+    PRD read, diff, or PR metadata every other arm would otherwise repeat identically. Each
+    entry is independent (a run without network access may have diff.patch but no pr.json) —
+    mention only the ones that actually exist. Empty string (no-op) when nothing is cached yet."""
+    parts = []
     if os.path.exists(os.path.join(WIRE_DIR, "context.md")):
-        return (" Read `wire/context.md` first — it is the shared PRD/diff/changed-files "
-                "context brief for this run; don't re-derive that context yourself.")
-    return ""
+        parts.append("`wire/context.md` (shared PRD/diff/changed-files context brief)")
+    if cache.has(WIRE_DIR, "diff.patch"):
+        parts.append("`wire/cache/diff.patch` (the full raw diff, already fetched — "
+                      "`bin/cache get diff.patch` or read the file directly; don't re-run `git diff` yourself)")
+    if cache.has(WIRE_DIR, "changed-files.txt"):
+        parts.append("`wire/cache/changed-files.txt` (changed-file list with status, already computed)")
+    if cache.has(WIRE_DIR, "pr.json"):
+        parts.append("`wire/cache/pr.json` (cached PR metadata — don't re-run `gh pr view`/`gh api` yourself)")
+    if not parts:
+        return ""
+    return " Read " + ", then ".join(parts) + " first; don't re-derive or re-fetch that context yourself."
+
+
+def precompute_context_cache(plan, dry_run):
+    """Push the diff/changed-files/PR-metadata fetch out of the (paid, LLM) composer and into
+    plain deterministic code, run ONCE before any agent is spawned — the driver already has
+    `target_repo` in hand, and a `git diff`/`gh pr view` is exactly the kind of fetch that
+    doesn't need a model at all. Every task that would otherwise re-run this itself (or wait on
+    a composer call to do it) gets it for the cost of a subprocess instead of a turn.
+
+    Deliberately bounded to what's safely derivable from the plan with no guessing:
+    - the diff needs a merge-base, which needs a base ref — use plan['base_ref'] if given,
+      else probe a short list of common upstream names (origin/main, origin/dev, ...) and use
+      the first that actually merge-bases cleanly against HEAD.
+    - PR metadata needs `gh` installed AND the checkout to have an associated PR AND network
+      egress to actually reach the GitHub API — any of those can be absent in a sandbox, so this
+      is wrapped to fail silently and fall back to the composer/soloist fetching it themselves.
+
+    Never fatal: this is pure optimization layered on top of a working fallback path (the
+    composer/soloist personas still know how to fetch this themselves if the cache is empty),
+    so any exception here is logged and swallowed, never raised."""
+    if dry_run:
+        return
+    target_repo = plan.get("target_repo")
+    if not target_repo or not os.path.isdir(target_repo):
+        return
+
+    if not cache.has(WIRE_DIR, "diff.patch"):
+        candidates = [plan["base_ref"]] if plan.get("base_ref") else [
+            "origin/main", "origin/master", "origin/dev", "main", "master", "dev"]
+        for base_ref in candidates:
+            try:
+                mb = subprocess.run(["git", "-C", target_repo, "merge-base", "HEAD", base_ref],
+                                     capture_output=True, text=True, timeout=15)
+                if mb.returncode != 0 or not mb.stdout.strip():
+                    continue
+                merge_base = mb.stdout.strip()
+                diff = subprocess.run(["git", "-C", target_repo, "diff", f"{merge_base}...HEAD"],
+                                       capture_output=True, timeout=60)
+                if diff.returncode == 0 and diff.stdout.strip():
+                    cache.set_bytes(WIRE_DIR, "diff.patch", diff.stdout)
+                    log(f"precomputed wire/cache/diff.patch vs {base_ref} "
+                        f"({len(diff.stdout)} bytes, $0.00 — no LLM call)")
+                    names = subprocess.run(["git", "-C", target_repo, "diff", "--name-status",
+                                             f"{merge_base}...HEAD"], capture_output=True, timeout=30)
+                    if names.returncode == 0 and names.stdout.strip():
+                        cache.set_bytes(WIRE_DIR, "changed-files.txt", names.stdout)
+                        log("precomputed wire/cache/changed-files.txt ($0.00 — no LLM call)")
+                    break
+            except Exception as e:
+                log(f"precompute diff (base_ref={base_ref}): skipped ({e})")
+
+    if not cache.has(WIRE_DIR, "pr.json") and shutil.which("gh"):
+        try:
+            pr = subprocess.run(
+                ["gh", "pr", "view", "--json", "number,title,body,baseRefName,headRefName,url"],
+                cwd=target_repo, capture_output=True, text=True, timeout=15)
+            if pr.returncode == 0 and pr.stdout.strip():
+                cache.set_text(WIRE_DIR, "pr.json", pr.stdout)
+                log("precomputed wire/cache/pr.json ($0.00 — no LLM call)")
+        except Exception as e:
+            log(f"precompute PR metadata: skipped ({e})")
 
 
 # ---- leaf execution: the ONLY place an LLM is spawned --------------------------
@@ -271,9 +346,21 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
     stops a single runaway call from blowing past it.
 
     `precomputed`, when given, is a (system, rc_cost) tuple from preflight_roll_call — reused
-    instead of rebuilt. Without it (verify/coverage/scribe calls, whose persona/cwd aren't
-    known until the task they check has already run), this builds its own system prompt and
-    does its own roll call inline."""
+    instead of rebuilt.
+
+    Without it (verify/coverage/scribe calls), this builds its own system prompt and pays NO
+    separate roll-call round trip. A dedicated echo-and-check `claude -p` call was originally
+    fired here too, once per coverage-gate call and once per verify call (so a single task with
+    `verify: pair` paid for FOUR roll calls: preflight's main-task check, then one more each for
+    critic/tuner/heckler) — a live $20-budget run measured this reserving ~$19.54 in roll-call +
+    projected cost before most real work had even happened, starving `security`/`synthesize`
+    entirely. Those downstream calls run in the SAME cwd the main task's roll call already
+    validated (same task id, same worktree-or-REPO_ROOT), and the only thing left to verify —
+    "did it write to the artifact path the driver dictated, not its persona doc's own habit" —
+    is already checked for free by `ok = os.path.exists(artifact)` a few lines below: a persona
+    that writes to the wrong place fails closed (INCONCLUSIVE / no-result), it doesn't silently
+    pass. Paying for a second confirmatory round trip on top of a check that already exists is
+    the double charge; cut here instead of adding more coverage to the same risk."""
     artifact = os.path.join(WIRE_DIR, f"{task_id}.{artifact_suffix}")
     if dry is not None:
         # Deterministic stub: exercise the orchestration without any API cost.
@@ -285,23 +372,7 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         system, rc_cost = precomputed
     else:
         system = build_system_prompt(persona, artifact, cwd)
-        # Roll call runs AFTER `system` is built so it checks comprehension under the exact
-        # same persona doc + driver-contract override text (and the exact same model) the real
-        # call gets — that pairing is what caused the composer bug this check exists to catch.
-        rc_cost, rc_status, rc_reason = roll_call(task_id, artifact, cwd, model, system)
-        if rc_status == "mismatch":
-            # A genuine comprehension failure — the check ran cleanly and echoed the WRONG
-            # coordinates. Worth hard-blocking: proceeding would spend real budget on a task
-            # that has already shown it read its own assignment wrong.
-            log(f"{task_id}: BLOCKED — {rc_reason}; skipping the real call to avoid spending "
-                f"budget on a task that misread its own coordinates")
-            return (rc_cost, False)
-        if rc_status == "error":
-            # The CHECK failed to run cleanly (bad JSON, cap exceeded, no line at all) — that
-            # says nothing about whether the real task would succeed, so fail OPEN rather than
-            # block real work over a flaky echo call.
-            log(f"{task_id}: {rc_reason} — proceeding anyway (roll call itself didn't complete "
-                f"cleanly, which isn't evidence the real task would fail)")
+        rc_cost = 0.0
 
     cmd = ["claude", "-p", prompt,
            "--append-system-prompt", system,
@@ -875,6 +946,7 @@ Emit a machine-readable plan to the ABSOLUTE path `{plan_path}` and NOTHING to t
 Write ONE JSON object, no prose around it, matching exactly:
   {{"budget_usd": <float>, "est_agent_usd": <float>, "default_model": "<model-id>",
     "target_repo": "<abs path or omit>",
+    "base_ref": "<e.g. origin/main — optional; lets the driver precompute the diff for free>",
     "tasks": [{{"id":"t1","persona":"soloist","prompt":"<self-contained task>",
                "verify":"none|single|pair|quorum3|quorum5","model":"<optional override>",
                "isolate": true,
@@ -901,6 +973,15 @@ Rules you must honor while authoring:
   owning task. A surface with no task is how real defects slip — cover it or omit it deliberately.
 - Right-size verify: default `single`; use `pair`/`quorum3` ONLY on the 2-3 riskiest claims.
   Don't add voters to low-stakes or already-clean checks.
+- Set `base_ref` when you know the upstream branch (e.g. `origin/main`) — the driver then
+  precomputes `wire/cache/diff.patch` itself, in plain code, for $0.00, BEFORE any agent runs.
+  Every task's prompt should still say to check `wire/cache/diff.patch` (or run
+  `bin/cache get diff.patch`) FIRST and only fall back to its own `git diff`/`gh pr view` if
+  that's missing — don't rely on a `composer` task alone to produce it; the driver may have
+  already done it for free. For any OTHER repeated fetch a task expects a peer to also need
+  (a large `gh api` call, a slow build/lint run), tell it to use
+  `bin/cache fetch <key> -- <command...>` instead of running the command bare — that's the
+  general get-or-fetch-and-store primitive (see bin/_cache_lib.py), not just for diffs.
 - Set `budget_usd` from your step 1b projection (agents x turns x context), not agent count.
 - personas available: {personas}. Ids must be unique and match [A-Za-z0-9_-]+.
 Return only after the file is written and is valid JSON. Writing prose instead of the file,
@@ -1108,6 +1189,11 @@ def _main_body(args):
         subprocess.run([WIRE, "clear"], cwd=REPO_ROOT, check=False, capture_output=True)
     log(f"{len(tasks)} tasks, budget ${budget:.2f}, "
         f"{'DRY-RUN' if args.dry_run else 'LIVE'}, concurrency {args.concurrency}")
+
+    # Zero-LLM-cost precompute BEFORE roll call — if this lands the diff/PR cache, every
+    # task's roll call and real call gets context_brief_note() pointed at it from turn one,
+    # instead of the composer needing an extra turn to fetch what plain code already fetched.
+    precompute_context_cache(plan, args.dry_run)
 
     # Roll call only the tasks that will actually (re)run — an already-resolved task doesn't
     # need re-confirming, and preflighting it would waste real money on a no-op check.
