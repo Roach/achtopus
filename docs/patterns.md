@@ -79,12 +79,14 @@ full fan-out with a 3-voter adversarial pass.
 
 ## Cost & scaling to stakes
 
-The full harness is not free, and the failure mode is spending casually. A real run —
-a 5-task security audit with a `soloist + tuner + heckler` triad per task (~15 subagents
-plus the orchestrator) — cost roughly **$26** end to end (~65 turns, ~370K output tokens,
-96% cache-hit). That was worth it for a security-sensitive domain where a missed evasion
-has real consequences; it is *not* a sensible default for routine refactors or
-"audit the whole codebase" sweeps.
+The full harness is not free, and the failure mode is spending casually. A `soloist +
+tuner + heckler` triad per task means ~3 subagents per task plus the orchestrator, so a
+5-task audit fans out ~15 subagents. Exact dollar attribution is hard to isolate — in the
+one measured case the audit ran inside a multi-hour session doing lots of other deep work,
+so the ~$26 session total reflects far more than the harness — but the shape is clear: the
+cost scales with how many agents you spawn, and the subagent tier dominates. That breadth
+is worth it for a security-sensitive domain where a missed evasion has real consequences;
+it is *not* a sensible default for routine refactors or "audit the whole codebase" sweeps.
 
 Levers, roughly in order of impact:
 
@@ -92,11 +94,10 @@ Levers, roughly in order of impact:
   high-consequence work. Low-stakes tasks want a single soloist, or a soloist + one
   verifier, or no separate verify at all. The conductor sizes this per task — don't
   reflexively fan out a triad for everything.
-- **Pick the subagent model tier deliberately.** In the measured run the *subagent* tier
-  was ~54% of cost, and those subagents ran on the cheaper Sonnet tier while the
-  orchestrator stayed on Opus — a deliberate split, not an accident. Run soloists and
-  verifiers on a cheaper model and reserve the top tier for the orchestrator and the
-  hardest verify/judge steps.
+- **Pick the subagent model tier deliberately.** In the measured session the *subagent*
+  tier was the larger share of cost, with subagents on the cheaper Sonnet tier and the
+  orchestrator on Opus — a sensible split. Run soloists and verifiers on a cheaper model
+  and reserve the top tier for the orchestrator and the hardest verify/judge steps.
 - **Dedup before you fan out.** Overlapping task scopes pay two agents to cover the same
   code and then cost you a manual reconcile. The conductor's pre-fanout overlap check
   (step 1a) exists to avoid this.
