@@ -24,7 +24,7 @@ Plan schema (see docs/harness.md and the example under examples/):
       "tasks": [
         {"id": "t1", "persona": "soloist", "prompt": "...",
          "verify": "pair",              # none | single | pair | quorum3 | quorum5 (default: single)
-         "model": "claude-opus-4-8",    # optional per-task override
+         "model": "claude-sonnet-5",    # optional per-task override
          "isolate": true,               # optional; git-worktree the target_repo
          "scope": ["services/checkout"],# optional blast-radius allowlist (path prefixes/globs,
                                          #   relative to target_repo); only checked if "target" is set
@@ -80,9 +80,24 @@ def context_brief_note():
 
 # ---- leaf execution: the ONLY place an LLM is spawned --------------------------
 
-def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None):
+def _log_failure(label, proc):
+    """A failed/uninterpretable claude -p call should leave a diagnostic trail, not just
+    a silent zero-cost guess — this is what let a $5.31 conductor call vanish with no clue why."""
+    out = (proc.stdout or "").strip()[:800]
+    err = (proc.stderr or "").strip()[:800]
+    log(f"{label}: no parseable cost (exit {proc.returncode})")
+    if out:
+        log(f"{label} stdout (truncated): {out}")
+    if err:
+        log(f"{label} stderr (truncated): {err}")
+
+
+def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, max_usd=None):
     """Spawn one persona agent headless; return (cost_usd, ok). The agent writes its
-    artifact to an ABSOLUTE bus path — it does no coordination, only its own work."""
+    artifact to an ABSOLUTE bus path — it does no coordination, only its own work.
+    `max_usd`, when given, is a HARD per-call spend cap (--max-budget-usd) — the pre-spawn
+    budget governor in process_task is only a projection; this is the backstop that actually
+    stops a single runaway call from blowing past it."""
     artifact = os.path.join(BUS_DIR, f"{task_id}.{artifact_suffix}")
     if dry is not None:
         # Deterministic stub: exercise the orchestration without any API cost.
@@ -104,12 +119,14 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None):
            "--add-dir", BUS_DIR]
     if cwd != REPO_ROOT:
         cmd += ["--add-dir", cwd]
+    if max_usd is not None:
+        cmd += ["--max-budget-usd", f"{max(max_usd, 0.01):.2f}"]
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     cost = 0.0
     try:
         cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
     except Exception:
-        log(f"{task_id}: could not parse cost from agent output (exit {proc.returncode})")
+        _log_failure(task_id, proc)
     return (cost, os.path.exists(artifact))
 
 
@@ -284,7 +301,7 @@ def tally_scorecard(results):
 
 # ---- coverage gate: critic checks rubric coverage BEFORE the tuner/heckler verify pass ---
 
-def run_coverage_gate(task, model, dry_run):
+def run_coverage_gate(task, model, dry_run, max_usd=None):
     """Spawn the critic to check whether the task's result answered every rubric question
     for its domain (docs/prr.md's A-K list) — a coverage gap is its own finding, separate
     from whether individual claims are correct (that stays the tuner/heckler's job). Returns
@@ -301,7 +318,7 @@ def run_coverage_gate(task, model, dry_run):
                f"'COVERAGE: complete' or 'COVERAGE: gaps'." + context_brief_note())
     dry = ({"body": "COVERAGE: complete — all rubric questions addressed.\n", "cost": 0.02}
            if dry_run else None)
-    cost, ok = run_agent("critic", cprompt, tid, "coverage.md", model, REPO_ROOT, dry)
+    cost, ok = run_agent("critic", cprompt, tid, "coverage.md", model, REPO_ROOT, dry, max_usd=max_usd)
     text = ""
     cpath = os.path.join(BUS_DIR, f"{tid}.coverage.md")
     if os.path.exists(cpath):
@@ -373,7 +390,10 @@ def process_task(task, plan, spend, budget, dry_run, lock):
     try:
         bus_state(tid, task["persona"], "claimed")
         dry = {"body": f"{tid} result (dry-run stub)\n", "cost": 0.05} if dry_run else None
-        cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry)
+        with lock:
+            headroom = max(budget - spend["usd"], est)
+        cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry,
+                              max_usd=headroom)
         with lock:
             spend["usd"] += cost
         if not ok:
@@ -387,7 +407,9 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         with lock:
             room = spend["usd"] + est <= budget
         if room:
-            ccost, gap, coverage_note = run_coverage_gate(task, model, dry_run)
+            with lock:
+                ccap = max(budget - spend["usd"], est)
+            ccost, gap, coverage_note = run_coverage_gate(task, model, dry_run, max_usd=ccap)
             with lock:
                 spend["usd"] += ccost
             if gap:
@@ -421,7 +443,9 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                 dry = {"body": body, "cost": 0.03}
             else:
                 dry = None
-            vcost, vok = run_agent(persona, vprompt, label, suffix, model, REPO_ROOT, dry)
+            with lock:
+                vcap = max(budget - spend["usd"], est)
+            vcost, vok = run_agent(persona, vprompt, label, suffix, model, REPO_ROOT, dry, max_usd=vcap)
             with lock:
                 spend["usd"] += vcost
             text = ""
@@ -500,21 +524,28 @@ Return only after the file is written and is valid JSON.
 """
 
 
+CONDUCTOR_CAP_USD = 1.00   # the plan-authoring call is supposed to be cheap — see docs/harness.md;
+                           # this is a hard backstop, not a soft estimate, after one call burned
+                           # $5.31 with no output because nothing capped it.
+
+
 def author_plan(goal, plan_path, model, budget):
     log("conductor authoring plan.json (the single coordination LLM call)")
     contract = PLAN_CONTRACT.format(plan_path=plan_path, personas=sorted(VALID_PERSONAS))
     system = persona_body("conductor") + contract
+    cap = min(budget, CONDUCTOR_CAP_USD) if budget is not None else CONDUCTOR_CAP_USD
     cmd = ["claude", "-p", goal, "--append-system-prompt", system,
            "--output-format", "json", "--model", model,
-           "--permission-mode", "acceptEdits", "--add-dir", BUS_DIR]
+           "--permission-mode", "acceptEdits", "--add-dir", BUS_DIR,
+           "--max-budget-usd", f"{cap:.2f}"]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     try:
         cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
         log(f"conductor done (${cost:.3f})")
     except Exception:
-        log(f"conductor call did not return parseable JSON (exit {proc.returncode})")
+        _log_failure("conductor", proc)
     if not os.path.exists(plan_path):
-        sys.exit("conductor did not write a plan.json — aborting")
+        sys.exit(f"conductor did not write a plan.json (capped at ${cap:.2f}) — aborting")
     plan = validate_plan(json.load(open(plan_path, encoding="utf-8")))
     if budget is not None:
         plan["budget_usd"] = budget      # CLI override wins over the conductor's estimate
@@ -536,7 +567,7 @@ def main():
         plan_path = os.path.join(BUS_DIR, "plan.json")
         os.makedirs(BUS_DIR, exist_ok=True)
         plan = author_plan(args.goal, plan_path,
-                           "claude-opus-4-8", args.budget)
+                           "claude-sonnet-5", args.budget)
     else:
         plan = validate_plan(json.load(open(args.plan, encoding="utf-8")))
         if args.budget is not None:
@@ -570,9 +601,11 @@ def main():
         if args.dry_run else "handing accepted results to scribe")
     if not args.dry_run and accepted:
         ids = ",".join(r["id"] for r in accepted)
+        scribe_cap = max(budget - spend["usd"], 0.50)
         run_agent("scribe", f"Synthesize the accepted results ({ids}) into a final report "
                   f"using docs/report-template.md. Read only accepted bus/<id>.result.md files.",
-                  "final", "report.md", plan.get("default_model", "claude-opus-4-8"), REPO_ROOT)
+                  "final", "report.md", plan.get("default_model", "claude-sonnet-5"), REPO_ROOT,
+                  max_usd=scribe_cap)
 
     n_acc = sum(1 for r in results if r["outcome"] == "accepted")
     n_rej = sum(1 for r in results if r["outcome"] == "rejected")

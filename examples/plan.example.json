@@ -8,7 +8,7 @@
       "persona": "soloist",
       "prompt": "Audit the synchronous request path for the target access-control leak.",
       "verify": "pair",
-      "model": "claude-opus-4-8",
+      "model": "claude-sonnet-5",
       "dry_verdict": "HOLDS"
     },
     {
@@ -16,7 +16,7 @@
       "persona": "soloist",
       "prompt": "Audit async jobs, exports, and feeds for the same egress class.",
       "verify": "quorum3",
-      "model": "claude-opus-4-8",
+      "model": "claude-sonnet-5",
       "dry_verdict": "HOLDS"
     },
     {

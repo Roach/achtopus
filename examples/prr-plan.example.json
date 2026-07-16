@@ -15,7 +15,7 @@
       "persona": "soloist",
       "prompt": "PRR domain — Data integrity & migrations: are schema/data migrations backward-compatible and zero-downtime (expand/contract), is the backfill idempotent with a rollback, and are backups/restore verified? Rate green/warning/red with evidence.",
       "verify": "pair",
-      "model": "claude-opus-4-8",
+      "model": "claude-sonnet-5",
       "dry_verdict": "HOLDS"
     },
     {
@@ -23,7 +23,7 @@
       "persona": "soloist",
       "prompt": "PRR domain — Rollout, deploy safety & rollback: is there a tested fast rollback, a feature flag/kill switch, a staged canary with gating metrics, and is infra defined as code? Rate green/warning/red with evidence.",
       "verify": "pair",
-      "model": "claude-opus-4-8",
+      "model": "claude-sonnet-5",
       "dry_verdict": "FAILS"
     },
     {
@@ -38,7 +38,7 @@
       "persona": "soloist",
       "prompt": "PRR domain — Security & privacy: authn/authz changes, untrusted input handling (XSS/SQLi/prompt-injection), network exposure, data-at-rest/in-transit encryption & tenant isolation, audit logging, and any sensitive-data handling. Rate green/warning/red with evidence; flag anything needing a human threat-model review.",
       "verify": "quorum3",
-      "model": "claude-opus-4-8",
+      "model": "claude-sonnet-5",
       "dry_verdict": "HOLDS"
     },
     {
