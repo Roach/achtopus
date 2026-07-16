@@ -147,17 +147,20 @@ def _log_failure(label, proc):
         log(f"{label} stderr (truncated): {err}")
 
 
-ROLLCALL_MODEL = "claude-haiku-4-5-20251001"
-ROLLCALL_CAP_USD = 0.05
+ROLLCALL_CAP_USD = 0.20
 
 
-def roll_call(task_id, artifact, cwd):
-    """Dedicated up-front comprehension check, run BEFORE the real work call — not folded into
-    it. An earlier version asked the agent to echo a RESTATE line in its own final response
-    alongside doing the real task, but that was silent almost every time in practice: a
-    persona's final message doesn't reliably repeat an early-turn aside verbatim. A tiny,
-    separate, single-purpose call (cheap model, hard-capped) is the only way to actually catch
-    a misread task id/artifact/cwd BEFORE spending real budget on the full call.
+def roll_call(task_id, artifact, cwd, model, system):
+    """Dedicated up-front comprehension check, run BEFORE the real work call. An earlier
+    version asked the agent to echo a RESTATE line inside its own final response alongside
+    doing the real task, but that was silent almost every time — a persona's final message
+    doesn't reliably repeat an early-turn aside. A separate call is the only reliable way to
+    catch a misread task id/artifact/cwd before spending real budget.
+
+    Uses the SAME model and system prompt (persona doc + driver-contract override) the real
+    call would get — a cheaper model or a bare prompt wouldn't exercise the persona doc's own
+    conflicting conventions (e.g. composer's "write to wire/context.md"), which is exactly what
+    the original bug was. A one-line echo stays cheap even on the real model tier.
 
     Returns (cost_usd, status, reason) where status is one of:
       "ok"       — echoed back exactly what it was given; safe to proceed.
@@ -168,12 +171,14 @@ def roll_call(task_id, artifact, cwd):
       "mismatch" — it ran fine and echoed back the WRONG coordinates. This is a genuine
                    comprehension failure and is the only status worth hard-blocking on."""
     prompt = (
-        f"Reply with ONLY this exact line, no other words, no tool calls, no file writes:\n"
+        f"Before starting any real work, restate your assignment. Reply with ONLY this "
+        f"exact line, no other words, no tool calls, no file writes:\n"
         f"RESTATE task={task_id} artifact={artifact} cwd={cwd}"
     )
     cmd = ["claude", "-p", prompt,
+           "--append-system-prompt", system,
            "--output-format", "json",
-           "--model", ROLLCALL_MODEL,
+           "--model", model,
            "--permission-mode", "acceptEdits",
            "--max-budget-usd", f"{ROLLCALL_CAP_USD:.2f}"]
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -192,34 +197,11 @@ def roll_call(task_id, artifact, cwd):
     return (cost, "ok", None)
 
 
-def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, max_usd=None):
-    """Spawn one persona agent headless; return (cost_usd, ok). The agent writes its
-    artifact to an ABSOLUTE wire path — it does no coordination, only its own work.
-    `max_usd`, when given, is a HARD per-call spend cap (--max-budget-usd) — the pre-spawn
-    budget governor in process_task is only a projection; this is the backstop that actually
-    stops a single runaway call from blowing past it."""
-    artifact = os.path.join(WIRE_DIR, f"{task_id}.{artifact_suffix}")
-    if dry is not None:
-        # Deterministic stub: exercise the orchestration without any API cost.
-        with open(artifact, "w", encoding="utf-8") as f:
-            f.write(dry["body"])
-        return (dry.get("cost", 0.0), True)
-
-    rc_cost, rc_status, rc_reason = roll_call(task_id, artifact, cwd)
-    if rc_status == "mismatch":
-        # A genuine comprehension failure — the check ran cleanly and echoed the WRONG
-        # coordinates. Worth hard-blocking: proceeding would spend real budget on a task
-        # that has already shown it read its own assignment wrong.
-        log(f"{task_id}: BLOCKED — {rc_reason}; skipping the real call to avoid spending "
-            f"budget on a task that misread its own coordinates")
-        return (rc_cost, False)
-    if rc_status == "error":
-        # The CHECK failed to run cleanly (bad JSON, cap exceeded, no line at all) — that says
-        # nothing about whether the real task would succeed, so fail OPEN rather than block
-        # real work over a flaky $0.05 echo call.
-        log(f"{task_id}: {rc_reason} — proceeding anyway (roll call itself didn't complete "
-            f"cleanly, which isn't evidence the real task would fail)")
-
+def build_system_prompt(persona, artifact, cwd):
+    """The driver-contract system prompt a persona runs under: its own doc plus the override
+    text telling it where to actually write and (if isolated) that its cwd is already a local
+    checkout. Extracted so the preflight roll-call phase can build the EXACT same prompt a
+    task will really run under, before spending anything on the real call."""
     system = persona_body(persona) + (
         f"\n\n## Driver contract (Achtopus)\n"
         f"You are running under the deterministic driver. Write your entire deliverable to the "
@@ -243,6 +225,50 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
             f"anything you can already read/run locally (`git diff`, `git log`, `git show`, "
             f"reading files, running tests) from this directory as-is."
         )
+    return system
+
+
+def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, max_usd=None,
+              precomputed=None):
+    """Spawn one persona agent headless; return (cost_usd, ok). The agent writes its
+    artifact to an ABSOLUTE wire path — it does no coordination, only its own work.
+    `max_usd`, when given, is a HARD per-call spend cap (--max-budget-usd) — the pre-spawn
+    budget governor in process_task is only a projection; this is the backstop that actually
+    stops a single runaway call from blowing past it.
+
+    `precomputed`, when given, is a (system, rc_cost) tuple from preflight_roll_call — reused
+    instead of rebuilt. Without it (verify/coverage/scribe calls, whose persona/cwd aren't
+    known until the task they check has already run), this builds its own system prompt and
+    does its own roll call inline."""
+    artifact = os.path.join(WIRE_DIR, f"{task_id}.{artifact_suffix}")
+    if dry is not None:
+        # Deterministic stub: exercise the orchestration without any API cost.
+        with open(artifact, "w", encoding="utf-8") as f:
+            f.write(dry["body"])
+        return (dry.get("cost", 0.0), True)
+
+    if precomputed is not None:
+        system, rc_cost = precomputed
+    else:
+        system = build_system_prompt(persona, artifact, cwd)
+        # Roll call runs AFTER `system` is built so it checks comprehension under the exact
+        # same persona doc + driver-contract override text (and the exact same model) the real
+        # call gets — that pairing is what caused the composer bug this check exists to catch.
+        rc_cost, rc_status, rc_reason = roll_call(task_id, artifact, cwd, model, system)
+        if rc_status == "mismatch":
+            # A genuine comprehension failure — the check ran cleanly and echoed the WRONG
+            # coordinates. Worth hard-blocking: proceeding would spend real budget on a task
+            # that has already shown it read its own assignment wrong.
+            log(f"{task_id}: BLOCKED — {rc_reason}; skipping the real call to avoid spending "
+                f"budget on a task that misread its own coordinates")
+            return (rc_cost, False)
+        if rc_status == "error":
+            # The CHECK failed to run cleanly (bad JSON, cap exceeded, no line at all) — that
+            # says nothing about whether the real task would succeed, so fail OPEN rather than
+            # block real work over a flaky echo call.
+            log(f"{task_id}: {rc_reason} — proceeding anyway (roll call itself didn't complete "
+                f"cleanly, which isn't evidence the real task would fail)")
+
     cmd = ["claude", "-p", prompt,
            "--append-system-prompt", system,
            "--output-format", "json",
@@ -307,6 +333,59 @@ def remove_worktree(target_repo, wt):
     subprocess.run(["git", "-C", target_repo, "worktree", "remove", "--force", wt],
                    capture_output=True, text=True)
     shutil.rmtree(wt, ignore_errors=True)
+
+
+def preflight_roll_call(tasks, plan, dry_run, concurrency):
+    """Roll-call every task in the plan before any real dispatch begins, ignoring dependency
+    order (comprehension doesn't depend on other tasks having run). Each check runs on the
+    exact (persona, model, cwd, system-prompt) tuple the task will get for real; isolate tasks
+    get their worktree created here so the check validates the real cwd, and process_task
+    reuses it via task['_wt']/['_cwd'] instead of creating a second one.
+
+    Mutates each task dict with _cwd/_wt/_model/_system for reuse. Returns total
+    preflight spend. Aborts the whole run (cleaning up worktrees) on any genuine MISMATCH; a
+    roll call that merely errored doesn't abort — that's not evidence the real call would."""
+    if dry_run:
+        return 0.0
+    log(f"roll call: checking {len(tasks)} task(s) before any real dispatch")
+    for t in tasks:
+        tid = t["id"]
+        t["_model"] = t.get("model", plan.get("default_model", DEFAULT_MODEL))
+        cwd = REPO_ROOT
+        if t.get("isolate") and plan.get("target_repo"):
+            wt = make_worktree(plan["target_repo"], tid)
+            t["_wt"] = wt
+            cwd = wt or REPO_ROOT
+        t["_cwd"] = cwd
+        t["_system"] = build_system_prompt(t["persona"], os.path.join(WIRE_DIR, f"{tid}.result.md"), cwd)
+
+    total_cost = 0.0
+    mismatches = []
+    with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = {ex.submit(roll_call, t["id"], os.path.join(WIRE_DIR, f"{t['id']}.result.md"),
+                           t["_cwd"], t["_model"], t["_system"]): t
+                for t in tasks}
+        for fut in cf.as_completed(futs):
+            t = futs[fut]
+            cost, status, reason = fut.result()
+            total_cost += cost
+            if status == "mismatch":
+                mismatches.append((t["id"], reason))
+                log(f"{t['id']}: roll call MISMATCH — {reason}")
+            elif status == "error":
+                log(f"{t['id']}: {reason} (roll call inconclusive, not blocking)")
+            else:
+                log(f"{t['id']}: roll call ok")
+
+    if mismatches:
+        for t in tasks:
+            if t.get("_wt"):
+                remove_worktree(plan["target_repo"], t["_wt"])
+        sys.exit(f"roll call failed for {len(mismatches)} task(s) before any real work was "
+                 f"dispatched (${total_cost:.3f} spent on checks): " +
+                 "; ".join(f"{tid}: {reason}" for tid, reason in mismatches))
+    log(f"roll call: all {len(tasks)} task(s) clear (${total_cost:.3f}) — dispatching")
+    return total_cost
 
 
 # ---- the programmatic gate: NO LLM decides accept/reject -----------------------
@@ -559,11 +638,13 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "budget-skipped", "cost": 0.0}
 
-    cwd = REPO_ROOT
-    wt = None
-    if task.get("isolate") and plan.get("target_repo") and not dry_run:
-        wt = make_worktree(plan["target_repo"], tid)
-        cwd = wt or REPO_ROOT
+    # cwd/worktree/system were already resolved by preflight_roll_call() (dry runs skip it, so
+    # these keys are absent and we fall back to the old defaults). Its roll-call cost is
+    # already folded into spend["usd"] as a lump sum in _main_body, so pass 0.0 here — not
+    # task["_rc_cost"] — to avoid counting it twice.
+    cwd = task.get("_cwd", REPO_ROOT)
+    wt = task.get("_wt")
+    precomputed = (task["_system"], 0.0) if "_system" in task else None
 
     try:
         wire_state(tid, task["persona"], "claimed")
@@ -571,7 +652,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         with lock:
             headroom = max(budget - spend["usd"], est)
         cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry,
-                              max_usd=headroom)
+                              max_usd=headroom, precomputed=precomputed)
         with lock:
             spend["usd"] += cost
         if not ok:
@@ -655,6 +736,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
     finally:
         if wt:
             remove_worktree(plan["target_repo"], wt)
+            task["_wt"] = None
 
 
 # ---- plan validation: a malformed plan fails loudly, never mid-run ------------
@@ -907,6 +989,12 @@ def _main_body(args):
     log(f"{len(tasks)} tasks, budget ${budget:.2f}, "
         f"{'DRY-RUN' if args.dry_run else 'LIVE'}, concurrency {args.concurrency}")
 
+    # Roll call ALL tasks up front, regardless of dependency order, and hold real dispatch
+    # until every one comes back clean (an automatic go/no-go, not a human-approval pause) —
+    # this is a whole-run gate, so it aborts the run entirely on any genuine mismatch rather
+    # than skipping just the offending task.
+    spend["usd"] += preflight_roll_call(tasks, plan, args.dry_run, args.concurrency)
+
     import threading
     lock = threading.Lock()
     results = []
@@ -944,6 +1032,14 @@ def _main_body(args):
         for tid, t in pending.items():
             log(f"{tid}: SKIPPED — unresolved/circular dependency on {sorted(deps[tid] - done_ids)}")
             results.append({"id": tid, "outcome": "dep-skipped", "cost": 0.0})
+
+    # Sweep any worktree preflight created that process_task never reached to clean up itself
+    # (dep-skipped, budget-skipped, scope-blocked all return before its own cleanup runs).
+    if plan.get("target_repo"):
+        for t in tasks:
+            if t.get("_wt"):
+                remove_worktree(plan["target_repo"], t["_wt"])
+                t["_wt"] = None
 
     # Synthesis: the ONE genuinely-LLM coordination step, run once on accepted work.
     accepted = [r for r in results if r["outcome"] == "accepted"]
