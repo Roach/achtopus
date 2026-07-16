@@ -163,8 +163,13 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
     system = persona_body(persona) + (
         f"\n\n## Driver contract (Achtopus)\n"
         f"You are running under the deterministic driver. Write your entire deliverable to the "
-        f"absolute path `{artifact}`. Do NOT edit wire/manifest.md or run bin/wire — the driver records "
-        f"all state. Coordinate only through files under `{WIRE_DIR}`."
+        f"absolute path `{artifact}` — and ONLY that path. This OVERRIDES any other output "
+        f"filename your persona description above mentions (e.g. composer's own instructions "
+        f"say to write `wire/context.md` — under the driver, ignore that and use `{artifact}` "
+        f"instead; the driver, not the persona doc, decides the artifact name per task so "
+        f"downstream tasks can find it by task id). Do NOT edit wire/manifest.md or run "
+        f"bin/wire — the driver records all state. Coordinate only through files under "
+        f"`{WIRE_DIR}`."
     )
     if cwd != REPO_ROOT:
         # cwd here is either the shared target_repo or a worktree isolated from it — either way
@@ -197,6 +202,17 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
     except Exception:
         _log_failure(task_id, proc)
     ok = os.path.exists(artifact)
+    if not ok and persona == "composer":
+        # composer's own persona doc (docs/patterns.md, .claude/agents/composer.md) says to
+        # write wire/context.md — a strongly-repeated convention from non-driver coordination
+        # mode that can win over the driver contract's told-you-once artifact path even after
+        # the contract was made explicit about overriding it. Recover the real work instead of
+        # burning the spend for nothing: if it landed at the conventional path, adopt it.
+        legacy = os.path.join(WIRE_DIR, "context.md")
+        if os.path.exists(legacy):
+            shutil.copyfile(legacy, artifact)
+            ok = True
+            log(f"{task_id}: composer wrote wire/context.md instead of {artifact} — recovered, copied over")
     # A real spend with no artifact is still a failure needing a diagnostic trail — don't
     # rely solely on the JSON-parse-exception path above, which never fires when the call
     # succeeds cleanly but the agent just didn't write its file (e.g. it hit max turns, was
