@@ -54,7 +54,7 @@ neurons and coordinate through a shared medium rather than a single controller.
 
 | Display name | Agent | Role in a PRR |
 |---|---|---|
-| 🐙 The Head | `conductor` | Inventory the readiness domains, assign one arm each, own the budget and gate the verdict |
+| 🎯 The Helm arm | `conductor` | Inventory the readiness domains, assign one arm each, own the budget and gate the verdict |
 | 🧭 The Surveyor | `composer` | Read the PRD/diff once and write the one shared context brief every arm reads |
 | 🔧 The Prober | `luthier` | Exercise a domain hands-on (run the rollback, trip the alert) |
 | 🔦 The Scout | `soloist` | Review one domain end to end and post findings |
