@@ -132,6 +132,19 @@ agent's `total_cost_usd`, and does the coordination in code:
   call plus one scribe synthesis. Malformed plans are rejected up front by `validate_plan()`
   (unknown persona, dup id, bad verify mode), never mid-run.
 
+### Two design notes from the wider ecosystem
+
+- **Leaf agents get real tools; scope them tight.** A known limitation of *in-session*
+  subagents (spawned via the built-in Agent tool) is that they can be cut off from MCP
+  server tools and restricted to file/bash. `bin/run` sidesteps this by spawning each leaf
+  as its own `claude -p` process, which carries its own tool/MCP config. The flip side —
+  exposing *all* tools to a worker causes decision paralysis and token waste — is why each
+  persona's `tools:` list in `.claude/agents/*.md` is deliberately narrow (the tuner/heckler
+  get read/exec tools, not Write-everything). Keep new personas scoped.
+- **Model-slicing is the cheap default.** The widely-adopted community pattern — top-tier
+  model as the supervisor/plan-author, cheap tier (Haiku) for the worker fan-out — is what
+  the plan's `default_model` + per-task `model` override exist to express.
+
 Run `bin/run examples/plan.example.json --dry-run` to exercise the whole control flow
 (accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost, or
 `bin/run --goal "<task>" --dry-run` to have the conductor author a real plan and then

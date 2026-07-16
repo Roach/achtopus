@@ -122,6 +122,12 @@ Levers, roughly in order of impact:
 - **Cache is your friend, breadth is the cost.** High cache-hit (~96% observed) means the
   spend is fan-out *breadth*, not wasted re-reads — so the dial that actually moves cost is
   how many agents you spawn, not how you prompt them.
+- **Keep a fan-out wave tight in wall-clock — the cache TTL is short.** Prompt caching
+  expires on a short idle timeout (single-digit minutes by default). A wave whose agents are
+  spawned close together shares warm cache; one that dribbles out over a long idle window
+  re-pays the cache *write* for the shared prefix. The corollary matters too: don't trim the
+  shared context just to save pennies — invalidating a cached prefix (cache rot) costs far
+  more than the tokens you shaved. Stabilize the shared prefix, spawn each wave promptly.
 
 Rule of thumb: if a lighter ad-hoc pass (say, a single reviewer or a 3-agent check) would
 catch the same class of issue, use it. Bring the full orchestra out when being

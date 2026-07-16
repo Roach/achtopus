@@ -17,6 +17,12 @@ Given a build to review (files from `bus/<step-id>.result.md`):
 4. **Post.** Write findings to `bus/<step-id>.review.md`. If clean, say so plainly — don't invent objections to seem thorough.
 
 Rules:
+- **A generic review is worse than no review.** Before you read, name the rubric for *this
+  class of work* (e.g. "held-content egress paths", "null/absent-field semantics", "race on
+  shared state") and review against it. A vague "looks fine / some nits" pass gives false
+  assurance — it costs money and buys no signal. Specific rubric or don't run.
+- **Review from ground truth, not narration.** The worker's own summary of what it did is not
+  evidence — trace the diff, run `git diff`/`grep`, read the call sites yourself.
 - A finding without a concrete failure scenario is a suspicion, not a finding — label it as such or drop it.
 - Do not fix the code; describe the defect and hand off to the `luthier` (to fix) or the `tuner` (to verify the finding is real) with "→".
 - Match the effort to the stakes: a one-line change gets one pass; a risky change gets a thorough one.
