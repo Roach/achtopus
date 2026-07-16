@@ -147,6 +147,51 @@ def _log_failure(label, proc):
         log(f"{label} stderr (truncated): {err}")
 
 
+ROLLCALL_MODEL = "claude-haiku-4-5-20251001"
+ROLLCALL_CAP_USD = 0.05
+
+
+def roll_call(task_id, artifact, cwd):
+    """Dedicated up-front comprehension check, run BEFORE the real work call — not folded into
+    it. An earlier version asked the agent to echo a RESTATE line in its own final response
+    alongside doing the real task, but that was silent almost every time in practice: a
+    persona's final message doesn't reliably repeat an early-turn aside verbatim. A tiny,
+    separate, single-purpose call (cheap model, hard-capped) is the only way to actually catch
+    a misread task id/artifact/cwd BEFORE spending real budget on the full call.
+
+    Returns (cost_usd, status, reason) where status is one of:
+      "ok"       — echoed back exactly what it was given; safe to proceed.
+      "error"    — the check itself didn't run cleanly (bad JSON, no RESTATE line at all,
+                   cap exceeded). This says nothing about whether the real task would have
+                   succeeded, so the caller should fail OPEN (proceed with a warning) rather
+                   than block real work over a flaky echo call.
+      "mismatch" — it ran fine and echoed back the WRONG coordinates. This is a genuine
+                   comprehension failure and is the only status worth hard-blocking on."""
+    prompt = (
+        f"Reply with ONLY this exact line, no other words, no tool calls, no file writes:\n"
+        f"RESTATE task={task_id} artifact={artifact} cwd={cwd}"
+    )
+    cmd = ["claude", "-p", prompt,
+           "--output-format", "json",
+           "--model", ROLLCALL_MODEL,
+           "--permission-mode", "acceptEdits",
+           "--max-budget-usd", f"{ROLLCALL_CAP_USD:.2f}"]
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    try:
+        parsed = json.loads(proc.stdout)
+    except Exception:
+        return (0.0, "error", "roll call: claude call returned no parseable JSON")
+    cost = float(parsed.get("total_cost_usd", 0.0))
+    m = RESTATE_RE.search(str(parsed.get("result", "")))
+    if m is None:
+        return (cost, "error", "roll call: no RESTATE line in response")
+    r_task, r_artifact, r_cwd = m.groups()
+    if r_task != task_id or r_artifact != artifact or r_cwd != cwd:
+        return (cost, "mismatch",
+                f"roll call mismatch — echoed task={r_task} artifact={r_artifact} cwd={r_cwd}")
+    return (cost, "ok", None)
+
+
 def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, max_usd=None):
     """Spawn one persona agent headless; return (cost_usd, ok). The agent writes its
     artifact to an ABSOLUTE wire path — it does no coordination, only its own work.
@@ -160,6 +205,21 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
             f.write(dry["body"])
         return (dry.get("cost", 0.0), True)
 
+    rc_cost, rc_status, rc_reason = roll_call(task_id, artifact, cwd)
+    if rc_status == "mismatch":
+        # A genuine comprehension failure — the check ran cleanly and echoed the WRONG
+        # coordinates. Worth hard-blocking: proceeding would spend real budget on a task
+        # that has already shown it read its own assignment wrong.
+        log(f"{task_id}: BLOCKED — {rc_reason}; skipping the real call to avoid spending "
+            f"budget on a task that misread its own coordinates")
+        return (rc_cost, False)
+    if rc_status == "error":
+        # The CHECK failed to run cleanly (bad JSON, cap exceeded, no line at all) — that says
+        # nothing about whether the real task would succeed, so fail OPEN rather than block
+        # real work over a flaky $0.05 echo call.
+        log(f"{task_id}: {rc_reason} — proceeding anyway (roll call itself didn't complete "
+            f"cleanly, which isn't evidence the real task would fail)")
+
     system = persona_body(persona) + (
         f"\n\n## Driver contract (Achtopus)\n"
         f"You are running under the deterministic driver. Write your entire deliverable to the "
@@ -169,14 +229,7 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         f"instead; the driver, not the persona doc, decides the artifact name per task so "
         f"downstream tasks can find it by task id). Do NOT edit wire/manifest.md or run "
         f"bin/wire — the driver records all state. Coordinate only through files under "
-        f"`{WIRE_DIR}`.\n\n"
-        f"Before doing anything else, print one line to your own final response (not into the "
-        f"artifact file) in exactly this format, filling in the values you were actually given "
-        f"above:\n"
-        f"RESTATE task={task_id} artifact={artifact} cwd={cwd}\n"
-        f"This is a cheap, up-front comprehension check the driver reads back — it costs you "
-        f"nothing but catches a misread task id, wrong artifact path, or wrong working "
-        f"directory before you spend any real work on the wrong target."
+        f"`{WIRE_DIR}`."
     )
     if cwd != REPO_ROOT:
         # cwd here is either the shared target_repo or a worktree isolated from it — either way
@@ -208,21 +261,6 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         cost = float(parsed.get("total_cost_usd", 0.0))
     except Exception:
         _log_failure(task_id, proc)
-    if parsed is not None:
-        # Cheap comprehension check: this is the SAME call, just reading back what the agent
-        # already said, so it costs nothing extra but surfaces a misread task id/artifact/cwd
-        # (e.g. the composer-wrote-wrong-path bug) the moment it happens instead of after the
-        # fact via a missing-artifact diagnostic below.
-        m = RESTATE_RE.search(str(parsed.get("result", "")))
-        if m is None:
-            log(f"{task_id}: no RESTATE line in response — can't confirm the agent read its "
-                f"task/artifact/cwd correctly")
-        else:
-            r_task, r_artifact, r_cwd = m.groups()
-            if r_task != task_id or r_artifact != artifact or r_cwd != cwd:
-                log(f"{task_id}: RESTATE mismatch — agent echoed task={r_task} "
-                    f"artifact={r_artifact} cwd={r_cwd}, expected task={task_id} "
-                    f"artifact={artifact} cwd={cwd}")
     ok = os.path.exists(artifact)
     if not ok and persona == "composer":
         # composer's own persona doc (docs/patterns.md, .claude/agents/composer.md) says to
@@ -249,7 +287,7 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         subtype = parsed.get("subtype")
         if subtype and subtype != "success":
             log(f"{task_id}: subtype={subtype}")
-    return (cost, ok)
+    return (cost + rc_cost, ok)
 
 
 # ---- worktree isolation: handed to the agent, not left to a prose rule ---------
