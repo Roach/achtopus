@@ -267,12 +267,27 @@ VERIFY_PLANS = {
 PLACEHOLDER_RE = re.compile(r"\b(TODO|TBD|FIXME|PLACEHOLDER|XXX)\b", re.I)
 
 
+CMD_VERBS_RE = re.compile(
+    r"`\s*(?:grep|git|curl|npm|yarn|npx|jest|pytest|sed|awk|find|python3?|node|ls|cat|go)\b[^`\n]*`"
+)
+
+
 def _evidence(text):
     """Proof-of-work signals in a verdict artifact (evidence-gate). Returns
-    (has_placeholder, has_command). A logged command = a fenced block or a `$ `/`> ` line."""
+    (has_placeholder, has_command). A logged command = a fenced block, a `$ `/`> ` line, or an
+    inline single-backtick span that STARTS with a known CLI verb (grep/git/npm/...) — this last
+    form was added after a live run showed a genuinely thorough, real verification (re-ran the
+    report's own grep, read 4 source files with line numbers) get discarded as INCONCLUSIVE
+    because it quoted its commands in prose with inline backticks instead of a fenced block.
+    Deliberately narrow: a backtick span merely citing a file PATH (no command verb) still does
+    NOT count — that would let a static-only citation masquerade as executed proof, defeating the
+    gate's actual purpose (a verb-anchored match means an actual command was quoted, not just a
+    reference to where in the code something lives)."""
     text = text or ""
     has_placeholder = bool(PLACEHOLDER_RE.search(text)) or not text.strip()
-    has_command = bool(re.search(r"```", text)) or bool(re.search(r"(?m)^[ \t]*[$>][ \t]+\S", text))
+    has_command = (bool(re.search(r"```", text))
+                   or bool(re.search(r"(?m)^[ \t]*[$>][ \t]+\S", text))
+                   or bool(CMD_VERBS_RE.search(text)))
     return has_placeholder, has_command
 
 
@@ -530,7 +545,12 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             label = f"{tid}.v{i}"
             vprompt = (f"Verify this claim from wire/{tid}.result.md. "
                        f"{'Try to CONFIRM by independent execution' if kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
-                       f"Tag your verdict executed/static." + context_brief_note())
+                       f"Tag your verdict executed/static. If you ran any command as evidence "
+                       f"(grep, git show, running a test), quote it in a fenced "
+                       f"```code block``` or on a line starting with `$ ` — the driver's "
+                       f"evidence gate strongly prefers those two forms; a command mentioned only "
+                       f"in prose risks being treated as no evidence at all, discarding your "
+                       f"verdict as INCONCLUSIVE even if you did the work." + context_brief_note())
             if dry_run:
                 dv = task.get("dry_verdict", "HOLDS")   # stub includes command evidence so it clears the gate
                 if kind == "confirm":
