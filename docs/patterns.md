@@ -96,10 +96,16 @@ bills. Gate on the turns×context projection before you fan out — see the cond
 
 Levers, roughly in order of impact:
 
-- **Right-size the fleet.** A full triad per task is ~3 agents. Reserve it for
-  high-consequence work. Low-stakes tasks want a single soloist, or a soloist + one
-  verifier, or no separate verify at all. The conductor sizes this per task — don't
-  reflexively fan out a triad for everything.
+- **Right-size the fleet — exhaustive over-provisions by default.** A full triad per task
+  is ~3 agents. Reserve it for high-consequence work. Low-stakes tasks want a single
+  soloist, or a soloist + one verifier, or no separate verify at all. In the 30-agent run,
+  the findings that actually changed the merge decision came from a handful of tasks (the
+  coverage/completeness critic and the null-semantics work); most of the 3-voter quorums
+  spent their budget *confirming things were clean* — reassuring but low marginal value. A
+  targeted run at roughly a third of the cost would very likely have returned ~90% of the
+  decision-relevant findings. Heuristic: **single-verifier by default, escalate to a
+  quorum only on the two or three riskiest claims** — not uniformly. "Be thorough" is a
+  request to widen *coverage of surfaces*, not to add voters to already-clean claims.
 - **Keep the driving session thin.** If a human-facing session plays conductor and does the
   coordinating/summarizing inline, every such step re-bills its whole growing transcript —
   a silent, compounding cost. Run the conductor and scribe as delegated subagents with
