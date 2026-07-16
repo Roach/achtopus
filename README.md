@@ -55,9 +55,9 @@ neurons and coordinate through a shared medium rather than a single controller.
 | Display name | Agent | Role in a PRR |
 |---|---|---|
 | 🐙 The Head | `conductor` | Inventory the readiness domains, assign one arm each, own the budget and gate the verdict |
-| 🧭 The Surveyor arm | `composer` | Read the PRD/diff once and write the one shared context brief every arm reads |
-| 🔧 The Prober arm | `luthier` | Exercise a domain hands-on (run the rollback, trip the alert) |
-| 🔦 The Scout arm | `soloist` | Review one domain end to end and post findings |
+| 🧭 The Surveyor | `composer` | Read the PRD/diff once and write the one shared context brief every arm reads |
+| 🔧 The Prober | `luthier` | Exercise a domain hands-on (run the rollback, trip the alert) |
+| 🔦 The Scout | `soloist` | Review one domain end to end and post findings |
 | 🧐 The Critic | `critic` | Gate rubric coverage — did the domain answer every A–K question before verify runs |
 | ✊ Grip | `tuner` | Confirm a finding — grip it and try to hold it up (independent observation) |
 | 🫳 Release | `heckler` | Refute a finding — try to make it let go (a different failure mode) |
