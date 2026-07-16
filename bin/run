@@ -755,12 +755,19 @@ def infer_deps(task, all_ids):
     without declaring "depends_on" explicitly — without this, concurrent dispatch can spawn a
     task before the results it's told to read even exist yet (seen live: a coverage/synthesis
     task raced ahead of the domain reviews it depended on and reported them as "never posted"
-    when they'd simply not finished yet)."""
+    when they'd simply not finished yet).
+
+    Requires a "wire/" prefix before the id, not just a bare word match — a conductor-authored
+    plan can give tasks human-readable ids like "correctness" or "security" that also occur as
+    ordinary English words in an unrelated task's prompt (e.g. "touches security-sensitive
+    surfaces"), and a bare-word match created a false wire/t2.result.md-style dependency loop
+    live (brief <-> correctness/observability/security), hanging every task as "unresolved
+    circular dependency" for the whole run."""
     prompt = task.get("prompt", "")
     tid = task["id"]
     found = set()
     for other in all_ids:
-        if other != tid and re.search(rf"\b{re.escape(other)}\b", prompt):
+        if other != tid and re.search(rf"wire/{re.escape(other)}\.result\.md\b", prompt):
             found.add(other)
     for m in re.finditer(r"\bt(\d+)\s*(?:\.\.|-)\s*t(\d+)\b", prompt):
         lo, hi = int(m.group(1)), int(m.group(2))
@@ -1008,6 +1015,26 @@ def _main_body(args):
     results = []
     all_ids = {t["id"] for t in tasks}
     deps = {t["id"]: set(t.get("depends_on", [])) | infer_deps(t, all_ids) for t in tasks}
+
+    # A cycle in the FINAL graph (explicit depends_on plus infer_deps) would otherwise just
+    # drain to "unresolved/circular dependency" once the dispatch loop empties — indistinguishable
+    # from a budget/timing skip, giving no signal that the plan itself is structurally broken.
+    # Fail loudly here instead, before any real work (or roll-call spend) is wasted chasing it.
+    unresolved = set(deps)
+    resolved = set()
+    while True:
+        ready = {tid for tid in unresolved if deps[tid] <= resolved}
+        if not ready:
+            break
+        resolved |= ready
+        unresolved -= ready
+    if unresolved:
+        for t in tasks:
+            if t.get("_wt"):
+                remove_worktree(plan["target_repo"], t["_wt"])
+        sys.exit(f"plan has a circular dependency among {sorted(unresolved)} — "
+                 f"aborting before any real dispatch (${spend['usd']:.3f} already spent on roll call)")
+
     for tid, d in deps.items():
         if d:
             log(f"{tid}: depends on {sorted(d)} — dispatch held until they finish")
