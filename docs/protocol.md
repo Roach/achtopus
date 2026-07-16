@@ -150,3 +150,17 @@ Note the 2-way rule is unanimity ("any `REFUTED` rejects"), which is *stricter* 
 majority — that's intended: with only two voters, one credible refutation should block.
 
 Only `accepted` work enters the scribe's final synthesis.
+
+## Blast-radius governor (scope)
+
+A `bin/run` plan task may optionally carry a `"scope"` field (a list of allowed path
+prefixes/globs, relative to `target_repo`) alongside a `"target"` field (the path/dir the
+task intends to touch) — relevant mainly to `luthier`/prober-style tasks that execute
+real commands and therefore have a real blast radius. When both are present, the driver
+refuses to spawn the agent if `target` isn't a subpath of any `scope` entry, and marks
+the task `blocked` with the mismatch as the reason — the same `blocked` state used
+elsewhere for a stuck or budget-skipped task, so recovery (G1) works unchanged.
+
+This is a **static allowlist check on declared plan fields**, not a runtime sandbox: it
+catches a task whose own stated target falls outside its own stated lane, nothing more.
+Both fields are optional and additive — a task with no `scope` behaves exactly as before.

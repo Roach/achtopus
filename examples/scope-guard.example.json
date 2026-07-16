@@ -1,0 +1,16 @@
+{
+  "budget_usd": 1.00,
+  "est_agent_usd": 0.05,
+  "default_model": "claude-haiku-4-5-20251001",
+  "target_repo": "/path/to/repo",
+  "tasks": [
+    {
+      "id": "s1",
+      "persona": "luthier",
+      "prompt": "Run the deploy script for the payments service.",
+      "verify": "none",
+      "scope": ["services/checkout"],
+      "target": "services/payments/deploy.sh"
+    }
+  ]
+}

@@ -19,8 +19,11 @@ ending in a **GO / GO-WITH-CONDITIONS / NO-GO** verdict.
 4. **Verify before clearing.** Every load-bearing finding goes through the tuner/heckler pair
    and the evidence gate (`docs/protocol.md`): a rating that claims "verified" must log real
    proof-of-work, or it is downgraded and does not clear.
-5. **Score and gate.** The scribe tallies the scorecard and applies the launch rule, then
-   writes the verdict (`docs/report-template.md`).
+5. **Score and gate.** The tally and launch rule are mechanical, so the driver computes
+   them deterministically from the accepted result artifacts' rating markers
+   (`bin/run`'s `tally_scorecard()`, a sibling to its `decide()` accept/reject gate) — no
+   LLM reasons out the count. The scribe's job is to explain and write up that verdict
+   (`docs/report-template.md`), not to compute it.
 
 ## The domain rubric
 
@@ -109,6 +112,11 @@ Rate each domain and tally:
 - 🔴 **red** — a launch blocker.
 
 **The rule: you don't need everything green, but nothing red at launch.**
+
+So the driver can tally this mechanically, a domain result artifact should carry its
+rating up front as `RATING: red` / `RATING: warning` / `RATING: green` (the ✅/⚠️/🔴 emoji
+alone is also recognized) — `bin/run`'s `tally_scorecard()` scans accepted results for
+this marker; a result with no marker simply isn't counted (not a PRR-shaped task).
 
 Map to Achtopus's severities and verdict:
 

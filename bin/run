@@ -23,9 +23,12 @@ Plan schema (see docs/harness.md and the example under examples/):
       "target_repo": "/path/to/repo",   # optional; enables worktree isolation
       "tasks": [
         {"id": "t1", "persona": "soloist", "prompt": "...",
-         "verify": "pair",              # none | single | pair | quorum3 | quorum5
+         "verify": "pair",              # none | single | pair | quorum3 | quorum5 (default: single)
          "model": "claude-opus-4-8",    # optional per-task override
          "isolate": true,               # optional; git-worktree the target_repo
+         "scope": ["services/checkout"],# optional blast-radius allowlist (path prefixes/globs,
+                                         #   relative to target_repo); only checked if "target" is set
+         "target": "services/checkout/deploy.sh",  # optional; path this task intends to touch
          "dry_verdict": "HOLDS"}        # --dry-run only: HOLDS|FAILS|INCONCLUSIVE
       ]
     }
@@ -33,7 +36,7 @@ Plan schema (see docs/harness.md and the example under examples/):
 The driver never asks an LLM to decide accept/reject or to summarize between
 waves; those are computed from the bus verdict files by code below.
 """
-import argparse, concurrent.futures as cf, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, concurrent.futures as cf, fnmatch, json, os, re, shutil, subprocess, sys, tempfile, time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUS_DIR = os.path.join(REPO_ROOT, "bus")
@@ -62,6 +65,17 @@ def bus_state(task_id, role, state):
     """The DRIVER owns the board — agents never touch it. Deterministic, ~free."""
     subprocess.run([BUS, "status", task_id, role, state], cwd=REPO_ROOT,
                    check=False, capture_output=True)
+
+
+def context_brief_note():
+    """If the composer (the Surveyor arm) has written the shared grounding brief to
+    bus/context.md for this run, point the caller at it instead of re-deriving the same
+    PRD read / diff — reuse the existing bus mechanism, don't invent a new one. Empty
+    string (no-op) when no brief exists for this run."""
+    if os.path.exists(os.path.join(BUS_DIR, "context.md")):
+        return (" Read `bus/context.md` first — it is the shared PRD/diff/changed-files "
+                "context brief for this run; don't re-derive that context yourself.")
+    return ""
 
 
 # ---- leaf execution: the ONLY place an LLM is spawned --------------------------
@@ -211,6 +225,63 @@ def decide(verdicts):
     return (False, "a confirmer did not return HOLDS")
 
 
+RATING_RE = re.compile(r"RATING:\s*(red|warning|green)", re.I)
+
+
+def extract_rating(text):
+    """Parse the rating marker convention (docs/report-template.md / docs/prr.md): a
+    result artifact should start its rating with 'RATING: red|warning|green', or carry
+    the equivalent 🔴/⚠️/✅ emoji. Returns 'red'/'warning'/'green' or None if no marker
+    is present (i.e. this task's result isn't PRR-shaped)."""
+    m = RATING_RE.search(text or "")
+    if m:
+        return m.group(1).lower()
+    if "🔴" in (text or ""):
+        return "red"
+    if "⚠️" in (text or ""):
+        return "warning"
+    if "✅" in (text or ""):
+        return "green"
+    return None
+
+
+def tally_scorecard(results):
+    """Deterministic scorecard tally + launch-rule verdict — a sibling to decide(): pure
+    code, same reasoning docs/prr.md describes ("the scribe tallies the scorecard and
+    applies the launch rule") but computed here instead of reasoned out by an LLM. Scans
+    each ACCEPTED task's bus/<id>.result.md for a rating marker (see extract_rating) and
+    applies the mechanical "no red at launch" rule:
+      any red -> NO-GO; no red but any warning -> GO-WITH-CONDITIONS; all green -> GO.
+    Returns None (never raises) when no accepted result carries a rating marker at all —
+    i.e. this isn't a PRR-shaped plan — so callers can skip the summary line gracefully."""
+    counts = {"red": 0, "warning": 0, "green": 0}
+    rated = 0
+    for r in results:
+        if r.get("outcome") != "accepted":
+            continue
+        path = os.path.join(BUS_DIR, f"{r['id']}.result.md")
+        if not os.path.exists(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        rating = extract_rating(text)
+        if rating is None:
+            continue
+        counts[rating] += 1
+        rated += 1
+    if rated == 0:
+        return None
+    if counts["red"] > 0:
+        verdict = "NO-GO"
+    elif counts["warning"] > 0:
+        verdict = "GO-WITH-CONDITIONS"
+    else:
+        verdict = "GO"
+    return {"counts": counts, "n_domains": rated, "verdict": verdict}
+
+
 # ---- coverage gate: critic checks rubric coverage BEFORE the tuner/heckler verify pass ---
 
 def run_coverage_gate(task, model, dry_run):
@@ -227,7 +298,7 @@ def run_coverage_gate(task, model, dry_run):
                f"whether the result answered every question for that domain, or whether some "
                f"were silently unaddressed. Do not judge whether the answers given are correct — "
                f"that is a separate verify step. First line of your report must be exactly "
-               f"'COVERAGE: complete' or 'COVERAGE: gaps'.")
+               f"'COVERAGE: complete' or 'COVERAGE: gaps'." + context_brief_note())
     dry = ({"body": "COVERAGE: complete — all rubric questions addressed.\n", "cost": 0.02}
            if dry_run else None)
     cost, ok = run_agent("critic", cprompt, tid, "coverage.md", model, REPO_ROOT, dry)
@@ -245,12 +316,46 @@ def run_coverage_gate(task, model, dry_run):
     return cost, gap, note
 
 
+# ---- scope governor: a static allowlist check, not a sandbox -------------------
+
+def check_scope(task):
+    """Blast-radius guardrail (opt-in, additive). A task MAY declare a 'scope' (list of
+    allowed path prefixes/globs, relative to target_repo) alongside a 'target' (the
+    path/dir it intends to touch — relevant to luthier/prober tasks that execute real
+    commands). If both are present and 'target' is not a subpath of any 'scope' entry,
+    refuse before spawning the agent. This is a static string/glob check on declared
+    fields, NOT runtime sandboxing — it catches a task whose own stated target is
+    outside its declared lane, nothing more.
+
+    Absent 'scope' (or absent 'target'), behavior is unchanged — nothing to check, so
+    nothing is enforced; this keeps the governor fully backward compatible."""
+    scope = task.get("scope")
+    target = task.get("target")
+    if not scope or not target:
+        return (True, None)
+    target_norm = str(target).replace("\\", "/").lstrip("/")
+    for pattern in scope:
+        p = str(pattern).replace("\\", "/").rstrip("/")
+        if (target_norm == p or target_norm.startswith(p + "/")
+                or fnmatch.fnmatch(target_norm, p)):
+            return (True, None)
+    return (False, f"target {target!r} is outside declared scope {scope!r}")
+
+
 # ---- the coordination loop (deterministic; this is what replaces the LLM) -------
 
 def process_task(task, plan, spend, budget, dry_run, lock):
     tid = task["id"]
     model = task.get("model", plan.get("default_model", "claude-haiku-4-5-20251001"))
     est = plan.get("est_agent_usd", 0.15)
+
+    # Scope governor — refuse before spawning if the task's own declared target falls
+    # outside its declared allowlist. Cheap, so it runs before the budget check.
+    scope_ok, scope_reason = check_scope(task)
+    if not scope_ok:
+        log(f"{tid}: BLOCKED — scope governor ({scope_reason})")
+        bus_state(tid, task["persona"], "blocked")
+        return {"id": tid, "outcome": "scope-blocked", "reason": scope_reason, "cost": 0.0}
 
     # Budget governor — a HARD refusal, the thing prose never enforced.
     with lock:
@@ -291,7 +396,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             log(f"{tid}: critic coverage gate SKIPPED — budget governor")
 
         # Verify stage — spawn the configured verifiers, then GATE IN CODE.
-        verify = task.get("verify", "pair")
+        verify = task.get("verify", "single")
         verdicts = []
         for i, (persona, kind) in enumerate(VERIFY_PLANS.get(verify, [])):
             with lock:
@@ -303,7 +408,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             label = f"{tid}.v{i}"
             vprompt = (f"Verify this claim from bus/{tid}.result.md. "
                        f"{'Try to CONFIRM by independent execution' if kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
-                       f"Tag your verdict executed/static.")
+                       f"Tag your verdict executed/static." + context_brief_note())
             if dry_run:
                 dv = task.get("dry_verdict", "HOLDS")   # stub includes command evidence so it clears the gate
                 if kind == "confirm":
@@ -357,8 +462,13 @@ def validate_plan(plan):
             raise ValueError(f"{where}: 'persona' must be one of {sorted(VALID_PERSONAS)}")
         if not isinstance(t.get("prompt"), str) or not t["prompt"].strip():
             raise ValueError(f"{where}: 'prompt' must be a non-empty string")
-        if t.get("verify", "pair") not in VERIFY_PLANS:
+        if t.get("verify", "single") not in VERIFY_PLANS:
             raise ValueError(f"{where}: 'verify' must be one of {sorted(VERIFY_PLANS)}")
+        if "scope" in t and not (isinstance(t["scope"], list)
+                                  and all(isinstance(s, str) for s in t["scope"])):
+            raise ValueError(f"{where}: 'scope', if present, must be a list of strings")
+        if "target" in t and not isinstance(t["target"], str):
+            raise ValueError(f"{where}: 'target', if present, must be a string")
     return plan
 
 
@@ -373,8 +483,13 @@ Write ONE JSON object, no prose around it, matching exactly:
     "target_repo": "<abs path or omit>",
     "tasks": [{{"id":"t1","persona":"soloist","prompt":"<self-contained task>",
                "verify":"none|single|pair|quorum3|quorum5","model":"<optional override>",
-               "isolate": true}}]}}
+               "isolate": true,
+               "scope": ["<optional list of allowed path prefixes/globs, relative to target_repo>"],
+               "target": "<optional path this task intends to touch>"}}]}}
 Rules you must honor while authoring:
+- `scope`/`target` are optional and only meaningful for luthier/prober-style tasks that
+  execute real commands with a blast radius. If you set one, set the other — the driver's
+  scope governor only enforces the allowlist when both are present on the same task.
 - Do your step 1a surface inventory FIRST: list the surfaces the goal spans and give each an
   owning task. A surface with no task is how real defects slip — cover it or omit it deliberately.
 - Right-size verify: default `single`; use `pair`/`quorum3` ONLY on the 2-3 riskiest claims.
@@ -467,6 +582,13 @@ def main():
     print(f"  spend ${spend['usd']:.2f} / budget ${budget:.2f}"
           + ("  \033[31m(governor engaged)\033[0m" if n_skip and spend['usd'] + plan.get('est_agent_usd',0.15) > budget else ""))
     print(f"  coordination cost: $0.00 — no LLM in the loop (see docs/harness.md)")
+
+    scorecard = tally_scorecard(results)
+    if scorecard is not None:
+        c = scorecard["counts"]
+        print(f"  domain tally ({scorecard['n_domains']}): "
+              f"\033[32m✅ {c['green']}\033[0m  \033[33m⚠️ {c['warning']}\033[0m  "
+              f"\033[31m🔴 {c['red']}\033[0m  →  \033[1m{scorecard['verdict']}\033[0m")
 
 
 if __name__ == "__main__":
