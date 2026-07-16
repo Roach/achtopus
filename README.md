@@ -8,22 +8,54 @@ personas one shared channel — the bus — so they can decompose work, hand it 
 pipeline, adversarially verify each other, and reconcile as peers, all through files you
 can `cat` and `grep`.
 
-## Why it exists (the gap)
+## Mission
 
-The existing ecosystem is strong on *knowledge* and weak on *coordination*:
+**Give Claude Code a coordination layer that is legible, adversarial, and boring on
+purpose.**
 
-- **Agentflow** (`~/webflow/.agentflow`) is a deliberately orchestration-free knowledge
-  harness — its manifesto says "no orchestration layers." Its agents are single-shot
-  specialist reviewers that never talk to each other.
-- **`slack-bus`** is a message bus, but only Claude ↔ *you* — there is no agent ↔ agent
-  channel.
-- Native subagent fan-out returns values to a parent, but has **no shared plan, no
-  task-id ledger, and no re-synthesis contract**.
-- **Adversarial verify** exists only as prose principles — never as an actual
-  verifier/skeptic agent pair.
+Acht Opus lets several agents work on one problem the way a small, disciplined team does:
+work is decomposed and owned, results are handed off through a shared record, claims are
+challenged before they are believed, and one voice writes the final answer. The whole
+apparatus is eight agent personas and a pile of markdown files you can `cat`. There is no
+daemon, no database, no bespoke protocol server — coordination state is human-readable text
+on disk, so a person (or any agent) can always see who is doing what, what was accepted, and
+why.
 
-Acht Opus fills exactly those holes: a real peer channel, a task ledger, and an
-adversarial pair — without re-implementing what Claude Code already does natively.
+The framework optimizes for **trust in the output**, not throughput. Its central bet: the
+failure mode of multi-agent systems is not "too slow" but "confidently wrong and impossible
+to audit" — so every mechanism here exists to make coordination inspectable and to make
+unverified claims fail closed.
+
+## The problem
+
+Claude Code can already spawn subagents and run tools in parallel. What it lacks is a
+**shared, durable, agent-to-agent coordination medium** and a **structural discipline for
+believing results**. That gap produces four recurring failures.
+
+1. **Agents can't talk through a shared record.** Native subagent fan-out returns a value to
+   the *parent* and nowhere else. Two workers on the same problem have no common surface to
+   read or write — no shared plan, no ledger of who owns what, no place to flag a conflict.
+   Parallel agents duplicate work, silently diverge, or drop results, and no one can
+   reconstruct what happened.
+2. **"Done" is asserted, never verified.** Adversarial checking tends to exist only as prose
+   advice — "verify carefully," review checklists — with no structural pair that actually
+   tries to *confirm* and *break* a claim before it is accepted. A plausible-but-wrong
+   result, the most dangerous output an agent produces, sails through because nothing is
+   charged with attacking it.
+3. **Coordination state is invisible and lossy.** When orchestration lives inside a parent
+   agent's context window, it evaporates on compaction, can't be grepped, and can't be
+   handed to a fresh session — exactly when a long or failed run makes "what was decided and
+   why" most urgent.
+4. **Recovery is undefined.** Real runs have agents that die mid-task, claims that can't be
+   settled, and tasks that need reassigning. Without an explicit lifecycle, a system either
+   wedges (a dead owner strands its task forever) or papers over failure by spawning
+   duplicates.
+
+Acht Opus answers each with a concrete mechanism: a **file message bus** (the shared
+record), an **adversarial-verify pair** (confirm + refute before accept), **eight legible
+personas** (one per coordination primitive), and an **explicit task lifecycle with
+recovery** (claim, block, unblock, reassign, reap) — without re-implementing what Claude
+Code already does natively.
 
 ## The eight personas
 
@@ -77,10 +109,32 @@ The personas read `docs/protocol.md` and `bus/board.md` to coordinate. To make t
 available in other projects, symlink `.claude/agents/*.md` into that project's
 `.claude/agents/` (or into `~/.claude/agents/` for every session).
 
+## What success looks like
+
+1. **Auditability** — for any run, a person can open `bus/` and reconstruct who did what,
+   what was challenged, what was accepted, and why, without reading a single agent transcript.
+2. **Fail-closed correctness** — no claim reaches the final synthesis without surviving an
+   independent attempt to break it. An inconclusive verify blocks; it never defaults to accept.
+3. **No lost or duplicated work** — the claim guard and shared ledger make double-claims and
+   dropped results structurally hard, and stranded tasks are recoverable rather than terminal.
+4. **It eats its own dog food** — the framework can run its full loop against its own codebase
+   and surface real defects. (It has: two self-audit rounds found and fixed eleven issues in
+   v1 and three more in v2, each confirmed by the adversarial pair.)
+
+## Non-goals
+
+- **Not a replacement for native subagent spawning or parallel tool calls.** Acht Opus adds
+  the shared channel and the verify gate that native execution lacks; it does not re-wrap
+  what Claude Code already does well.
+- **Not a general workflow engine or scheduler.** No DAG runtime, no retry service, no cron.
+  The bus is a record and a protocol, not an execution platform.
+- **Not built for raw throughput.** Where speed and trust conflict, it chooses trust: an
+  extra verification pass over a faster unverified answer, every time.
+
 ## Design rules it inherits
 
 - **Resume, don't respawn** — check the board before claiming; the claim guard enforces it.
 - **Keep raw logs out of the orchestrator's context** — read board lines, not transcripts.
 - **Only `accepted` work ships** — nothing enters synthesis until the adversarial pair clears it.
-- **Extend, don't replace** — for webflow/PR-stack work, defer to Agentflow; for human
-  steering, layer on `slack-bus`.
+- **Compose, don't absorb** — layer on other tools (e.g. a human-in-the-loop chat bus) rather
+  than reimplementing them; Acht Opus fills the agent↔agent coordination gap, not everything.
