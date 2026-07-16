@@ -664,7 +664,12 @@ def main():
     spend = {"usd": 0.0}
     tasks = plan["tasks"]
 
-    subprocess.run([WIRE, "init"], cwd=REPO_ROOT, check=False, capture_output=True)
+    # `clear` (not `init`) so each run starts from a fresh manifest: bin/run has no
+    # resume-from-manifest logic — every task in the plan dispatches fresh every time — so an
+    # `init`-only manifest would silently accumulate/collide with a prior run's same-named task
+    # ids (t1.result.md etc. overwritten in place). `clear` archives the prior run's full file
+    # set into wire/_archive/<timestamp>/ first, namespacing each run by its own archive folder.
+    subprocess.run([WIRE, "clear"], cwd=REPO_ROOT, check=False, capture_output=True)
     log(f"{len(tasks)} tasks, budget ${budget:.2f}, "
         f"{'DRY-RUN' if args.dry_run else 'LIVE'}, concurrency {args.concurrency}")
 
