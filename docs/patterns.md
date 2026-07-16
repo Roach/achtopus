@@ -76,3 +76,34 @@ conductor decomposes (pattern 1)
 
 Scale to the ask: a quick task might be one soloist + one tuner; "be thorough" earns the
 full fan-out with a 3-voter adversarial pass.
+
+## Cost & scaling to stakes
+
+The full harness is not free, and the failure mode is spending casually. A real run —
+a 5-task security audit with a `soloist + tuner + heckler` triad per task (~15 subagents
+plus the orchestrator) — cost roughly **$26** end to end (~65 turns, ~370K output tokens,
+96% cache-hit). That was worth it for a security-sensitive domain where a missed evasion
+has real consequences; it is *not* a sensible default for routine refactors or
+"audit the whole codebase" sweeps.
+
+Levers, roughly in order of impact:
+
+- **Right-size the fleet.** A full triad per task is ~3 agents. Reserve it for
+  high-consequence work. Low-stakes tasks want a single soloist, or a soloist + one
+  verifier, or no separate verify at all. The conductor sizes this per task — don't
+  reflexively fan out a triad for everything.
+- **Pick the subagent model tier deliberately.** In the measured run the *subagent* tier
+  was ~54% of cost, and those subagents ran on the cheaper Sonnet tier while the
+  orchestrator stayed on Opus — a deliberate split, not an accident. Run soloists and
+  verifiers on a cheaper model and reserve the top tier for the orchestrator and the
+  hardest verify/judge steps.
+- **Dedup before you fan out.** Overlapping task scopes pay two agents to cover the same
+  code and then cost you a manual reconcile. The conductor's pre-fanout overlap check
+  (step 1a) exists to avoid this.
+- **Cache is your friend, breadth is the cost.** High cache-hit (~96% observed) means the
+  spend is fan-out *breadth*, not wasted re-reads — so the dial that actually moves cost is
+  how many agents you spawn, not how you prompt them.
+
+Rule of thumb: if a lighter ad-hoc pass (say, a single reviewer or a 3-agent check) would
+catch the same class of issue, use it. Bring the full orchestra out when being
+*confidently wrong* is expensive.

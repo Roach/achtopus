@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Acht Opus — install the eight personas as native Claude Code subagent types.
+#
+# Without this, you have to hand-inject each persona's markdown into a general-purpose
+# agent prompt. Symlinking the defs into a `.claude/agents/` directory makes `soloist`,
+# `tuner`, `heckler`, etc. invokable directly as subagent types.
+#
+# Usage:
+#   bin/install                 # symlink into ~/.claude/agents (available in every session)
+#   bin/install <target-dir>    # symlink into <target-dir>/.claude/agents (one project)
+#   bin/install --copy [dir]    # copy instead of symlink (for a snapshot that won't track edits)
+#   bin/install --uninstall [dir]
+#
+# Symlinks are the default so edits to the source defs propagate automatically.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$ROOT/.claude/agents"
+
+mode="link"
+case "${1:-}" in
+  --copy)      mode="copy"; shift ;;
+  --uninstall) mode="uninstall"; shift ;;
+esac
+
+target_base="${1:-$HOME}"
+DEST="$target_base/.claude/agents"
+
+agents=(conductor composer luthier soloist critic tuner heckler scribe)
+
+if [ "$mode" = "uninstall" ]; then
+  for a in "${agents[@]}"; do rm -f "$DEST/$a.md"; done
+  echo "uninstalled 8 Acht Opus personas from $DEST"
+  exit 0
+fi
+
+mkdir -p "$DEST"
+for a in "${agents[@]}"; do
+  s="$SRC/$a.md"; d="$DEST/$a.md"
+  [ -f "$s" ] || { echo "missing source: $s"; exit 1; }
+  if [ -e "$d" ] || [ -L "$d" ]; then
+    # Only clobber a link/file we own (points into this repo) or on explicit copy.
+    if [ -L "$d" ] && [ "$(readlink "$d")" = "$s" ]; then :; else rm -f "$d"; fi
+  fi
+  if [ "$mode" = "copy" ]; then cp "$s" "$d"; else ln -sf "$s" "$d"; fi
+done
+
+echo "installed 8 Acht Opus personas ($mode) into $DEST"
+echo "invoke them as subagent types: conductor composer luthier soloist critic tuner heckler scribe"

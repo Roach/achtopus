@@ -105,9 +105,16 @@ From a Claude Code session in this directory, invoke a persona and let it drive 
   tuner/heckler pair, and have the scribe synthesize the result.
 ```
 
-The personas read `docs/protocol.md` and `bus/board.md` to coordinate. To make them
-available in other projects, symlink `.claude/agents/*.md` into that project's
-`.claude/agents/` (or into `~/.claude/agents/` for every session).
+The personas read `docs/protocol.md` and `bus/board.md` to coordinate. To invoke them as
+native subagent types (rather than hand-injecting their markdown), install the defs once:
+
+```bash
+bin/install                 # symlink into ~/.claude/agents (every session)
+bin/install /path/to/proj   # symlink into one project's .claude/agents
+bin/install --uninstall     # remove them
+```
+
+After installing, `soloist`, `tuner`, `heckler`, etc. are available directly as agent types.
 
 ## What success looks like
 
