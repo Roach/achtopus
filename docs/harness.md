@@ -120,7 +120,11 @@ agent's `total_cost_usd`, and does the coordination in code:
   unanimity, quorum = strict majority, INCONCLUSIVE never accepts) with no LLM in the
   decision.
 - **Worktree isolation** — a task with `"isolate": true` and a plan `target_repo` runs in
-  its own `git worktree`, handed to the agent, not left to a prose rule.
+  its own `git worktree`, handed to the agent, not left to a prose rule. A plan's own
+  `target_repo` is untrusted (a hand-authored or `--goal`/conductor-authored `plan.json` could
+  otherwise point isolation's `git -C <target_repo> worktree add` at an arbitrary path) — it's
+  only honored if it matches the human-supplied `--target-repo` CLI flag exactly; otherwise
+  isolation is disabled for that run rather than trusting the plan.
 - **Manifest ownership** — only the driver writes the manifest (`bin/wire status`); agents write
   their own artifact to an absolute wire path and do no coordination.
 

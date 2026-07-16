@@ -198,6 +198,12 @@ case "$cmd" in
 
   clear)
     ensure_manifest
+    # Locked like `claim` — clear is the one command that moves/deletes files a concurrent
+    # writer may still be producing (e.g. another bin/run's in-flight *.result.md). Without
+    # this lock, a second run's `clear` can sweep the first run's live artifacts mid-write,
+    # causing its later verify/gate reads to see missing files and reject good work purely
+    # from the race, not from anything wrong with the reviewed content.
+    lock; trap unlock EXIT
     dest="$WIRE/_archive/$(stamp)"
     mkdir -p "$dest"
     shopt -s nullglob
@@ -206,6 +212,7 @@ case "$cmd" in
     done
     rm -f "$MANIFEST"
     ensure_manifest
+    unlock; trap - EXIT
     echo "archived prior wire into $dest; fresh manifest ready"
     ;;
 

@@ -47,6 +47,39 @@ AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
 WIRE = os.path.join(REPO_ROOT, "bin", "wire")
 
 
+RUN_LOCK = os.path.join(WIRE_DIR, ".run.lock")
+
+
+def acquire_run_lock():
+    """Refuse to start a second bin/run against the same wire/ while one is already live.
+    `wire clear` (called once, at the top of every run) archives the *entire* prior file set —
+    if a first run's persona subprocesses are still writing wire/<id>.result.md directly (they
+    write straight to disk, not through bin/wire, so bin/wire's own claim-lock never sees them),
+    a second run's clear can sweep those in-flight files into its own archive dir mid-write.
+    The first run's later verify/gate reads then see missing files and reject good work purely
+    from the race, not from anything about the reviewed content — confirmed live during this
+    framework's own self-test dogfooding. This is a whole-run guard, not just a `clear` lock."""
+    os.makedirs(WIRE_DIR, exist_ok=True)
+    if os.path.exists(RUN_LOCK):
+        try:
+            holder = int(open(RUN_LOCK, encoding="utf-8").read().strip())
+            os.kill(holder, 0)   # no exception -> holder process is alive
+            sys.exit(f"bin/run: another run is already active against {WIRE_DIR} "
+                     f"(pid {holder}) — refusing to start concurrently; wait for it to finish "
+                     f"or remove {RUN_LOCK} if that pid is confirmed dead")
+        except (OSError, ValueError):
+            pass   # stale lock (holder gone, or unreadable) — safe to reclaim
+    with open(RUN_LOCK, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+
+
+def release_run_lock():
+    try:
+        os.remove(RUN_LOCK)
+    except FileNotFoundError:
+        pass
+
+
 VALID_PERSONAS = {"conductor", "composer", "luthier", "soloist", "critic",
                   "tuner", "heckler", "scribe"}
 
@@ -645,10 +678,22 @@ def main():
                     f"and the scribe's final synthesis (default: {DEFAULT_MODEL})")
     ap.add_argument("--dry-run", action="store_true", help="stub agents; test orchestration free")
     ap.add_argument("--concurrency", type=int, default=6)
+    ap.add_argument("--target-repo", help="the ONLY target_repo a plan's worktree-isolate tasks "
+                     "may use; a plan's own declared target_repo is untrusted (a hand-authored or "
+                     "--goal/conductor-authored plan.json could otherwise point worktree isolation "
+                     "at an arbitrary path) and is ignored unless it matches this exactly")
     args = ap.parse_args()
 
     if bool(args.plan) == bool(args.goal):
         ap.error("provide exactly one of <plan.json> or --goal")
+    acquire_run_lock()
+    try:
+        _main_body(args)
+    finally:
+        release_run_lock()
+
+
+def _main_body(args):
     premium_model = args.premium_model or DEFAULT_MODEL
     if args.goal:
         plan_path = os.path.join(WIRE_DIR, "plan.json")
@@ -660,6 +705,16 @@ def main():
             plan["budget_usd"] = args.budget
     if args.model is not None:
         plan["default_model"] = args.model      # CLI tier flag wins over the plan's own default
+    if plan.get("target_repo"):
+        # A plan's own target_repo is untrusted — hand-authored or conductor/--goal-authored
+        # plan.json could otherwise point worktree isolation's `git -C <target_repo> worktree add`
+        # at an arbitrary path with no containment check. Only the human-supplied --target-repo
+        # CLI flag is trusted; drop the plan's value (disabling isolation) if it doesn't match.
+        if not args.target_repo or os.path.abspath(plan["target_repo"]) != os.path.abspath(args.target_repo):
+            log(f"target_repo {plan['target_repo']!r} in the plan does not match "
+                f"--target-repo{' (not supplied)' if not args.target_repo else ''} — "
+                f"ignoring it; worktree isolation is disabled for this run")
+            plan["target_repo"] = None
     budget = float(plan.get("budget_usd", 1e9))
     spend = {"usd": 0.0}
     tasks = plan["tasks"]

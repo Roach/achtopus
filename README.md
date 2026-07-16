@@ -159,3 +159,10 @@ peer message wire, pipeline stages, and adversarial verify (`docs/patterns.md`),
 deterministic harness with a budget governor and a programmatic evidence gate
 (`docs/harness.md`, `docs/protocol.md`). The PRR is what it's *for*; the engine is how it
 stays trustworthy and cheap.
+
+## Contributing
+
+MIT licensed — see [`LICENSE`](LICENSE). Contributions welcome: see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for how to propose a change and
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for community expectations. Found a security issue?
+See [`SECURITY.md`](SECURITY.md) for how to report it privately.
