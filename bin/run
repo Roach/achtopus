@@ -194,9 +194,14 @@ def roll_call(task_id, artifact, cwd, model, system):
     if m is None:
         return (cost, "error", "roll call: no RESTATE line in response")
     r_task, r_artifact, r_cwd = m.groups()
-    if r_task != task_id or r_artifact != artifact or r_cwd != cwd:
+    # Compare cwd via realpath — macOS resolves /var/folders/... (what tempfile.mkdtemp()
+    # returns) through a symlink to /private/var/folders/..., and a persona that inspects its
+    # own location (e.g. via a tool call, despite being asked not to) may report the resolved
+    # form. Same directory, different string; a raw != would call it a false mismatch.
+    if r_task != task_id or r_artifact != artifact or os.path.realpath(r_cwd) != os.path.realpath(cwd):
         return (cost, "mismatch",
-                f"roll call mismatch — echoed task={r_task} artifact={r_artifact} cwd={r_cwd}")
+                f"roll call mismatch — echoed task={r_task} artifact={r_artifact} cwd={r_cwd} "
+                f"(expected task={task_id} artifact={artifact} cwd={cwd})")
     return (cost, "ok", None)
 
 
