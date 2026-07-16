@@ -29,6 +29,9 @@ Plan schema (see docs/harness.md and the example under examples/):
          "scope": ["services/checkout"],# optional blast-radius allowlist (path prefixes/globs,
                                          #   relative to target_repo); only checked if "target" is set
          "target": "services/checkout/deploy.sh",  # optional; path this task intends to touch
+         "depends_on": ["t2", "t3"],    # optional; task ids that must finish before this one is
+                                         #   dispatched (also auto-inferred from other task ids
+                                         #   literally referenced in "prompt" — see infer_deps())
          "dry_verdict": "HOLDS"}        # --dry-run only: HOLDS|FAILS|INCONCLUSIVE
       ]
     }
@@ -476,6 +479,28 @@ def process_task(task, plan, spend, budget, dry_run, lock):
 
 # ---- plan validation: a malformed plan fails loudly, never mid-run ------------
 
+def infer_deps(task, all_ids):
+    """Auto-detect same-run task ids a task's prompt tells it to read (e.g. "read bus/t2.result.md",
+    or a "t1..t5" range shorthand). A safety net for plans that reference other tasks' output
+    without declaring "depends_on" explicitly — without this, concurrent dispatch can spawn a
+    task before the results it's told to read even exist yet (seen live: a coverage/synthesis
+    task raced ahead of the domain reviews it depended on and reported them as "never posted"
+    when they'd simply not finished yet)."""
+    prompt = task.get("prompt", "")
+    tid = task["id"]
+    found = set()
+    for other in all_ids:
+        if other != tid and re.search(rf"\b{re.escape(other)}\b", prompt):
+            found.add(other)
+    for m in re.finditer(r"\bt(\d+)\s*(?:\.\.|-)\s*t(\d+)\b", prompt):
+        lo, hi = int(m.group(1)), int(m.group(2))
+        for n in range(lo, hi + 1):
+            cand = f"t{n}"
+            if cand in all_ids and cand != tid:
+                found.add(cand)
+    return found
+
+
 def validate_plan(plan):
     if not isinstance(plan, dict) or not isinstance(plan.get("tasks"), list) or not plan["tasks"]:
         raise ValueError("plan must be an object with a non-empty 'tasks' array")
@@ -499,6 +524,15 @@ def validate_plan(plan):
             raise ValueError(f"{where}: 'scope', if present, must be a list of strings")
         if "target" in t and not isinstance(t["target"], str):
             raise ValueError(f"{where}: 'target', if present, must be a string")
+        if "depends_on" in t and not (isinstance(t["depends_on"], list)
+                                        and all(isinstance(d, str) for d in t["depends_on"])):
+            raise ValueError(f"{where}: 'depends_on', if present, must be a list of strings")
+    for i, t in enumerate(plan["tasks"]):
+        for dep in t.get("depends_on", []):
+            if dep not in seen:
+                raise ValueError(f"tasks[{i}]: depends_on references unknown id {dep!r}")
+            if dep == t["id"]:
+                raise ValueError(f"tasks[{i}]: depends_on cannot reference its own id")
     return plan
 
 
@@ -515,8 +549,21 @@ Write ONE JSON object, no prose around it, matching exactly:
                "verify":"none|single|pair|quorum3|quorum5","model":"<optional override>",
                "isolate": true,
                "scope": ["<optional list of allowed path prefixes/globs, relative to target_repo>"],
-               "target": "<optional path this task intends to touch>"}}]}}
+               "target": "<optional path this task intends to touch>",
+               "depends_on": ["<optional list of task ids that must finish first>"]}}]}}
 Rules you must honor while authoring:
+- If a task's prompt tells it to read another task's bus/<id>.result.md output, you MUST list
+  that id in `depends_on` — the driver dispatches concurrently by default and will NOT wait for
+  another task to finish unless told to. A task that reads output that doesn't exist yet will
+  wrongly report it as missing, not merely late.
+- **Your own budget cap for THIS call is intentionally small and has NOTHING to do with the
+  plan's execution budget.** You may see a low `--max-budget-usd` on this very invocation —
+  that limits only the cost of writing the plan, not what the plan is allowed to spend. Never
+  read a tight cap on yourself as a reason to skip planning and do the review inline instead;
+  that defeats the entire point of this mode. No matter how constrained THIS call feels,
+  you MUST emit a valid plan.json and nothing else — do not write a report, scorecard, or
+  findings directly. If you are unsure the goal is affordable, express that by setting a
+  small/cheap plan (fewer tasks, cheaper `model`), never by abandoning the plan format.
 - `scope`/`target` are optional and only meaningful for luthier/prober-style tasks that
   execute real commands with a blast radius. If you set one, set the other — the driver's
   scope governor only enforces the allowlist when both are present on the same task.
@@ -526,7 +573,8 @@ Rules you must honor while authoring:
   Don't add voters to low-stakes or already-clean checks.
 - Set `budget_usd` from your step 1b projection (agents x turns x context), not agent count.
 - personas available: {personas}. Ids must be unique and match [A-Za-z0-9_-]+.
-Return only after the file is written and is valid JSON.
+Return only after the file is written and is valid JSON. Writing prose instead of the file,
+for any reason including cost, is a contract violation — the driver will abort the whole run.
 """
 
 
@@ -540,17 +588,32 @@ def author_plan(goal, plan_path, model, budget):
     contract = PLAN_CONTRACT.format(plan_path=plan_path, personas=sorted(VALID_PERSONAS))
     system = persona_body("conductor") + contract
     cap = min(budget, CONDUCTOR_CAP_USD) if budget is not None else CONDUCTOR_CAP_USD
-    cmd = ["claude", "-p", goal, "--append-system-prompt", system,
+    # The raw goal reads as a complete task ("review it for launch readiness") and a model will
+    # happily just DO it, overriding the system prompt's plan-authoring mode — seen live: the
+    # conductor wrote a full PRR verdict as prose instead of a plan.json, twice, despite the
+    # system prompt saying not to. Frame the user turn itself as a planning request, not the task.
+    prompt = (f"Do not perform this task yourself. Author a plan.json for OTHER agents to "
+              f"perform it, per the Deterministic-driver mode section of your system prompt. "
+              f"The task to plan for: {goal}")
+    cmd = ["claude", "-p", prompt, "--append-system-prompt", system,
            "--output-format", "json", "--model", model,
            "--permission-mode", "acceptEdits", "--add-dir", BUS_DIR,
            "--max-budget-usd", f"{cap:.2f}"]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    parsed = None
     try:
-        cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
+        parsed = json.loads(proc.stdout)
+        cost = float(parsed.get("total_cost_usd", 0.0))
         log(f"conductor done (${cost:.3f})")
     except Exception:
         _log_failure("conductor", proc)
     if not os.path.exists(plan_path):
+        # The call can "succeed" (parseable JSON, real cost) yet still not write the file —
+        # e.g. it hit the budget cap mid-task, or replied with prose instead of writing.
+        # _log_failure only fires on a parse exception, so log the conductor's own reply here.
+        if parsed is not None:
+            reply = str(parsed.get("result", parsed))[:800]
+            log(f"conductor reply (truncated): {reply}")
         sys.exit(f"conductor did not write a plan.json (capped at ${cap:.2f}) — aborting")
     plan = validate_plan(json.load(open(plan_path, encoding="utf-8")))
     if budget is not None:
@@ -595,17 +658,40 @@ def main():
     import threading
     lock = threading.Lock()
     results = []
+    all_ids = {t["id"] for t in tasks}
+    deps = {t["id"]: set(t.get("depends_on", [])) | infer_deps(t, all_ids) for t in tasks}
+    for tid, d in deps.items():
+        if d:
+            log(f"{tid}: depends on {sorted(d)} — dispatch held until they finish")
+    pending = {t["id"]: t for t in tasks}
+    done_ids = set()
     with cf.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futs = {ex.submit(process_task, t, plan, spend, budget, args.dry_run, lock): t
-                for t in tasks}
-        for fut in cf.as_completed(futs):
-            r = fut.result()
-            results.append(r)
-            tag = {"accepted": "\033[32m✓\033[0m", "rejected": "\033[31m✗\033[0m"}.get(
-                r["outcome"], "\033[33m•\033[0m")
-            log(f"{tag} {r['id']}: {r['outcome']}"
-                + (f" — {r.get('reason')}" if r.get("reason") else "")
-                + f"  (${r['cost']:.3f})")
+        in_flight = {}
+
+        def submit_ready():
+            for tid in list(pending):
+                if deps[tid] <= done_ids:
+                    t = pending.pop(tid)
+                    fut = ex.submit(process_task, t, plan, spend, budget, args.dry_run, lock)
+                    in_flight[fut] = t
+
+        submit_ready()
+        while in_flight:
+            done, _ = cf.wait(in_flight.keys(), return_when=cf.FIRST_COMPLETED)
+            for fut in done:
+                t = in_flight.pop(fut)
+                r = fut.result()
+                results.append(r)
+                done_ids.add(t["id"])
+                tag = {"accepted": "\033[32m✓\033[0m", "rejected": "\033[31m✗\033[0m"}.get(
+                    r["outcome"], "\033[33m•\033[0m")
+                log(f"{tag} {r['id']}: {r['outcome']}"
+                    + (f" — {r.get('reason')}" if r.get("reason") else "")
+                    + f"  (${r['cost']:.3f})")
+            submit_ready()
+        for tid, t in pending.items():
+            log(f"{tid}: SKIPPED — unresolved/circular dependency on {sorted(deps[tid] - done_ids)}")
+            results.append({"id": tid, "outcome": "dep-skipped", "cost": 0.0})
 
     # Synthesis: the ONE genuinely-LLM coordination step, run once on accepted work.
     accepted = [r for r in results if r["outcome"] == "accepted"]
