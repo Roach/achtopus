@@ -147,7 +147,7 @@ def _log_failure(label, proc):
         log(f"{label} stderr (truncated): {err}")
 
 
-ROLLCALL_CAP_USD = 0.20
+ROLLCALL_CAP_USD = 0.75
 
 
 def roll_call(task_id, artifact, cwd, model, system):
@@ -187,6 +187,9 @@ def roll_call(task_id, artifact, cwd, model, system):
     except Exception:
         return (0.0, "error", "roll call: claude call returned no parseable JSON")
     cost = float(parsed.get("total_cost_usd", 0.0))
+    if parsed.get("subtype") == "error_max_budget_usd":
+        return (cost, "error", f"roll call: hit ROLLCALL_CAP_USD (${ROLLCALL_CAP_USD:.2f}) before "
+                                f"producing a RESTATE line — the cap may be too tight, not a flaky echo")
     m = RESTATE_RE.search(str(parsed.get("result", "")))
     if m is None:
         return (cost, "error", "roll call: no RESTATE line in response")
