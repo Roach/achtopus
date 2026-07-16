@@ -1,21 +1,21 @@
-# Achtopus — Bus Protocol
+# Achtopus — Wire Protocol
 
-The bus is the one thing the rest of the ecosystem lacks: a **greppable, agent↔agent
+The wire is the one thing the rest of the ecosystem lacks: a **greppable, agent↔agent
 coordination channel** on the filesystem. No daemon, no DB. If you can `cat` it, you
 know the state of the world.
 
-## Files under `bus/`
+## Files under `wire/`
 
 | File | Written by | Purpose |
 |---|---|---|
-| `board.md` | scribe (and `bin/bus`) | The ledger — one fact per line, every task's owner + state |
+| `manifest.md` | scribe (and `bin/wire`) | The ledger — one fact per line, every task's owner + state |
 | `plan.md` | conductor | The shared plan: ordered steps with ids + acceptance checks |
 | `context.md` | composer | The one shared grounding brief (PRD read + diff inventory) every other arm reads instead of re-deriving |
 | `<id>.result.md` | soloist / luthier | The deliverable/output for task `<id>` |
 | `<id>.coverage.md` | critic | Rubric-coverage gate on a domain result: `COVERAGE: complete` / `COVERAGE: gaps` (+ which rubric letters) |
 | `<id>.verdict.md` | tuner | Verify verdict: `HOLDS` / `FAILS` / `INCONCLUSIVE` |
 | `<id>.refute.md` | heckler | Refutation attempt: `REFUTED` / `SURVIVES` |
-| `_archive/<stamp>/` | `bin/bus clear` | Prior reviews, kept for the record |
+| `_archive/<stamp>/` | `bin/wire clear` | Prior reviews, kept for the record |
 
 ## Task lifecycle
 
@@ -26,23 +26,23 @@ know the state of the world.
        └── blocked (needs help) ◄─────────────────┴─► rejected ─────┘   by scribe
 ```
 
-States on the board: `claimed → done → (accepted | rejected)`. `blocked` is a stuck task
+States on the manifest: `claimed → done → (accepted | rejected)`. `blocked` is a stuck task
 needing help. `claimed`/`done`/`accepted` are **held** (an active owner exists — do not
 re-claim). `rejected`/`blocked` are **re-claimable** for reassignment.
 
 ### State semantics (last-line-wins)
 
-The board is an append-only log, so a task's **current state is the last state line for
+The manifest is an append-only log, so a task's **current state is the last state line for
 its id** — earlier lines are history, not the truth. A "state line" has the shape
 `[<utc>] <id> <role> <state>`; free-text `post` notes use `note` and never affect state.
-Id matching is **field-exact**, so `t1` never matches `t10`. `bin/bus` computes this for
-you (`bus state <id>`); never hand-scan the raw log to decide current state.
+Id matching is **field-exact**, so `t1` never matches `t10`. `bin/wire` computes this for
+you (`wire state <id>`); never hand-scan the raw log to decide current state.
 
 ### Recovery: unblock / reassign (G1)
 
 A `blocked` or `rejected` task is not a dead end. Either:
-- `bin/bus claim <id> <new-role>` — re-claims directly (logged as a reassignment), or
-- `bin/bus unblock <id>` — moves it to `open` first, then claim.
+- `bin/wire claim <id> <new-role>` — re-claims directly (logged as a reassignment), or
+- `bin/wire unblock <id>` — moves it to `open` first, then claim.
 
 The claim guard only refuses **held** states, so recovery never fights the guard.
 
@@ -50,11 +50,11 @@ The claim guard only refuses **held** states, so recovery never fights the guard
 
 - **Allocation.** In the orchestrator pattern the `conductor` is the sole id allocator
   (`t1..tN` in `plan.md`). In the peer pattern, the `scribe` owns id allocation on the
-  board — peers request the next id from the scribe rather than both guessing `t4`.
-- **Atomicity.** `bin/bus claim` takes an atomic lock (mkdir) around its read-modify-write,
-  so two concurrent claimers cannot both pass the guard. Always claim via `bin/bus`, never
-  by hand-appending to `board.md`.
-- **Abandoned tasks.** `bin/bus stale [minutes]` lists tasks stuck in `claimed` past a
+  manifest — peers request the next id from the scribe rather than both guessing `t4`.
+- **Atomicity.** `bin/wire claim` takes an atomic lock (mkdir) around its read-modify-write,
+  so two concurrent claimers cannot both pass the guard. Always claim via `bin/wire`, never
+  by hand-appending to `manifest.md`.
+- **Abandoned tasks.** `bin/wire stale [minutes]` lists tasks stuck in `claimed` past a
   threshold (default 30m). A stranded claim is recovered with `unblock`/re-claim after
   confirming the owner is truly dead (check with `SendMessage` first).
 
@@ -62,16 +62,16 @@ The claim guard only refuses **held** states, so recovery never fights the guard
 
 Every unit of work gets a short stable id (`t1`, `t2`, … or a plan step id) that never
 changes. All artifacts for that unit are named by the id (`t3.result.md`,
-`t3.verdict.md`). This is what makes the bus greppable: `grep t3 bus/board.md` tells you
+`t3.verdict.md`). This is what makes the wire greppable: `grep t3 wire/manifest.md` tells you
 everything that ever happened to task 3.
 
 ## Two hard rules inherited from global CLAUDE.md
 
-1. **Resume, don't respawn.** Before claiming a task, check the board. If it's already
+1. **Resume, don't respawn.** Before claiming a task, check the manifest. If it's already
    `claimed`/`done`/`accepted`, resume that owner (`SendMessage`) — never spawn a
-   duplicate. `bin/bus claim` enforces this and exits non-zero on a double-claim.
+   duplicate. `bin/wire claim` enforces this and exits non-zero on a double-claim.
 2. **Never read a full result log into the orchestrator's context.** The conductor and
-   scribe read board lines and one-line pointers, not raw worker transcripts. Use
+   scribe read manifest lines and one-line pointers, not raw worker transcripts. Use
    `grep`/`tail` on result files, never a blind `Read` of a long one.
 
 ## Accept/reject decision

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Achtopus — file message bus helper.
+# Achtopus — file-based coordination wire.
 # A greppable, human-readable coordination channel for the octopus's eight arms.
-# No daemon, no database: the filesystem IS the bus. Every agent reads/writes the
-# same files under $BUS, so the state of the world is always `cat`-able and `grep`-able.
+# No daemon, no database: the filesystem IS the wire. Every agent reads/writes the
+# same files under $WIRE, so the state of the world is always `cat`-able and `grep`-able.
 #
 # Usage:
-#   bus init                       # ensure a board exists (does NOT clear; use `clear` to reset)
-#   bus post    <id> <role> <text> # append a free-text note to the board for task <id>
-#   bus claim   <id> <role>        # take ownership of task <id> (guarded, atomic)
-#   bus status  <id> <state>       # set task <id> to done|accepted|rejected|blocked
-#   bus unblock <id>               # move a blocked/rejected task back to open for re-claim
-#   bus board                      # print the ledger
-#   bus state   <id>               # print the current (latest) state of one task
-#   bus results                    # list all posted result artifacts
-#   bus stale   [minutes]          # list tasks stuck in `claimed` longer than N min (default 30)
-#   bus watch   [pattern]          # tail the board for actionable state changes
-#   bus clear                      # archive the current bus into bus/_archive/<stamp>
+#   wire init                       # ensure a manifest exists (does NOT clear; use `clear` to reset)
+#   wire post    <id> <role> <text> # append a free-text note to the manifest for task <id>
+#   wire claim   <id> <role>        # take ownership of task <id> (guarded, atomic)
+#   wire status  <id> <state>       # set task <id> to done|accepted|rejected|blocked
+#   wire unblock <id>               # move a blocked/rejected task back to open for re-claim
+#   wire manifest                   # print the ledger
+#   wire state   <id>               # print the current (latest) state of one task
+#   wire results                    # list all posted result artifacts
+#   wire stale   [minutes]          # list tasks stuck in `claimed` longer than N min (default 30)
+#   wire watch   [pattern]          # tail the manifest for actionable state changes
+#   wire clear                      # archive the current wire into wire/_archive/<stamp>
 #
 # States: claimed -> done -> (accepted | rejected). blocked is a stuck task needing help.
 # rejected/blocked are re-claimable (reassign); claimed/done/accepted are held (active).
@@ -27,23 +27,23 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUS="${ACHT_BUS:-$ROOT/bus}"
-BOARD="$BUS/board.md"
-LOCK="$BUS/.lock"
+WIRE="${ACHT_WIRE:-$ROOT/wire}"
+MANIFEST="$WIRE/manifest.md"
+LOCK="$WIRE/.lock"
 
-mkdir -p "$BUS"
+mkdir -p "$WIRE"
 
 stamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 # Task ids must be a simple token. Rejecting anything else prevents a backslash (which
-# `awk -v` would C-escape, breaking the lookup) or whitespace from corrupting board lines.
+# `awk -v` would C-escape, breaking the lookup) or whitespace from corrupting manifest lines.
 require_id() {
   case "$1" in
     ""|*[!A-Za-z0-9_-]*) echo "bad task id: '$1' (allowed: letters, digits, - _)"; exit 2 ;;
   esac
 }
 
-# Collapse CR/LF in free text so a `post` note can never inject a second physical board
+# Collapse CR/LF in free text so a `post` note can never inject a second physical manifest
 # line that would be misread as a state line.
 sanitize() { printf '%s' "$1" | tr '\r\n' '  '; }
 
@@ -61,20 +61,20 @@ lock() {
       rm -rf "$LOCK"; continue   # holder process is gone — stale lock, clear and retry now
     fi
     sleep 0.05; n=$((n+1))
-    [ "$n" -gt 200 ] && { echo "bus: lock timeout"; exit 4; }
+    [ "$n" -gt 200 ] && { echo "wire: lock timeout"; exit 4; }
   done
   echo $$ > "$LOCK/pid"
 }
 unlock() { rm -rf "$LOCK" 2>/dev/null || true; }
 
-ensure_board() {
-  if [ ! -f "$BOARD" ]; then
+ensure_manifest() {
+  if [ ! -f "$MANIFEST" ]; then
     {
-      echo "# Achtopus — Bus Board"
+      echo "# Achtopus — Wire Manifest"
       echo ""
       echo "One fact per line. Format: [<utc>] <id> <role> <state> — <note>"
       echo ""
-    } > "$BOARD"
+    } > "$MANIFEST"
   fi
 }
 
@@ -84,48 +84,48 @@ latest_state() {
   awk -v id="$id" '
     $2==id && ($4=="claimed"||$4=="done"||$4=="accepted"||$4=="rejected"||$4=="blocked"||$4=="open") { last=$4 }
     END { print last }
-  ' "$BOARD"
+  ' "$MANIFEST"
 }
 
 # Current owner for an id (role of its latest claim). Empty if unclaimed.
 latest_owner() {
   local id="$1"
-  awk -v id="$id" '$2==id && $4=="claimed" { owner=$3 } END { print owner }' "$BOARD"
+  awk -v id="$id" '$2==id && $4=="claimed" { owner=$3 } END { print owner }' "$MANIFEST"
 }
 
-cmd="${1:-board}"; shift || true
+cmd="${1:-manifest}"; shift || true
 
 case "$cmd" in
   init)
-    ensure_board
-    echo "[$(stamp)] — bus init (board ready at $BOARD)"
+    ensure_manifest
+    echo "[$(stamp)] — wire init (manifest ready at $MANIFEST)"
     ;;
 
   post)
     id="${1:?task id required}"; role="${2:?role required}"; shift 2
     require_id "$id"
     text="$(sanitize "$*")"
-    ensure_board
-    echo "[$(stamp)] $id $role note — $text" >> "$BOARD"
+    ensure_manifest
+    echo "[$(stamp)] $id $role note — $text" >> "$MANIFEST"
     echo "posted: $id ($role)"
     ;;
 
   claim)
     id="${1:?task id required}"; role="${2:?role required}"
     require_id "$id"
-    ensure_board
+    ensure_manifest
     lock; trap unlock EXIT
     state="$(latest_state "$id")"
     case "$state" in
       claimed|done|accepted)
         echo "WARN: $id is $state (owner: $(latest_owner "$id")) — resume that owner, don't double-play:"
-        awk -v id="$id" '$2==id' "$BOARD" | tail -1
+        awk -v id="$id" '$2==id' "$MANIFEST" | tail -1
         unlock; trap - EXIT
         exit 3
         ;;
     esac
     # empty | open | rejected | blocked -> claimable (fresh claim or reassignment)
-    echo "[$(stamp)] $id $role claimed — owner set${state:+ (reassigned from $state)}" >> "$BOARD"
+    echo "[$(stamp)] $id $role claimed — owner set${state:+ (reassigned from $state)}" >> "$MANIFEST"
     unlock; trap - EXIT
     echo "claimed: $id by $role${state:+ (was $state)}"
     ;;
@@ -136,50 +136,50 @@ case "$cmd" in
     case "$state" in done|accepted|rejected|blocked) ;; *)
       echo "bad state: $state (want done|accepted|rejected|blocked; use claim to set claimed)"; exit 2 ;;
     esac
-    ensure_board
+    ensure_manifest
     owner="$(latest_owner "$id")"; owner="${owner:--}"
-    echo "[$(stamp)] $id $owner $state — status set" >> "$BOARD"
+    echo "[$(stamp)] $id $owner $state — status set" >> "$MANIFEST"
     echo "status: $id → $state"
     ;;
 
   unblock)
     id="${1:?task id required}"
     require_id "$id"
-    ensure_board
+    ensure_manifest
     state="$(latest_state "$id")"
     case "$state" in
       blocked|rejected)
-        echo "[$(stamp)] $id - open — unblocked (was $state)" >> "$BOARD"
+        echo "[$(stamp)] $id - open — unblocked (was $state)" >> "$MANIFEST"
         echo "unblocked: $id (was $state) — now open for re-claim" ;;
       "") echo "unblock: $id has no state yet; it's already open"; exit 0 ;;
       *)  echo "unblock: $id is $state, not blocked/rejected — nothing to do"; exit 2 ;;
     esac
     ;;
 
-  board)
-    ensure_board
-    cat "$BOARD"
+  manifest)
+    ensure_manifest
+    cat "$MANIFEST"
     ;;
 
   state)
-    id="${1:?task id required}"; require_id "$id"; ensure_board
+    id="${1:?task id required}"; require_id "$id"; ensure_manifest
     s="$(latest_state "$id")"; echo "${s:-open}"
     ;;
 
   results)
     shopt -s nullglob
-    files=( "$BUS"/*.result.md "$BUS"/*.review.md "$BUS"/*.verdict.md "$BUS"/*.refute.md )
+    files=( "$WIRE"/*.result.md "$WIRE"/*.review.md "$WIRE"/*.verdict.md "$WIRE"/*.refute.md )
     if [ ${#files[@]} -eq 0 ]; then echo "(no result artifacts yet)"; else printf '%s\n' "${files[@]}"; fi
     ;;
 
   stale)
-    ensure_board
+    ensure_manifest
     mins="${1:-30}"
     now=$(date -u +%s)
     # Report tasks whose latest state is `claimed` and whose claim is older than $mins.
     awk '$4=="claimed"||$4=="done"||$4=="accepted"||$4=="rejected"||$4=="blocked"||$4=="open" {
            ts=$1; gsub(/[\[\]]/,"",ts); state[$2]=$4; when[$2]=ts }
-         END { for (id in state) if (state[id]=="claimed") print id, when[id] }' "$BOARD" |
+         END { for (id in state) if (state[id]=="claimed") print id, when[id] }' "$MANIFEST" |
     while read -r id ts; do
       # portable ISO8601 -> epoch (macOS date -j; fall back to GNU date -d)
       e=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || date -u -d "$ts" +%s 2>/dev/null || echo "")
@@ -190,23 +190,23 @@ case "$cmd" in
     ;;
 
   watch)
-    ensure_board
+    ensure_manifest
     pattern="${1:-claimed|done|accepted|rejected|blocked|conflict}"
-    echo "watching $BOARD for: $pattern  (ctrl-c to stop)"
-    tail -n 0 -f "$BOARD" | grep -E --line-buffered "$pattern"
+    echo "watching $MANIFEST for: $pattern  (ctrl-c to stop)"
+    tail -n 0 -f "$MANIFEST" | grep -E --line-buffered "$pattern"
     ;;
 
   clear)
-    ensure_board
-    dest="$BUS/_archive/$(stamp)"
+    ensure_manifest
+    dest="$WIRE/_archive/$(stamp)"
     mkdir -p "$dest"
     shopt -s nullglob
-    for f in "$BUS"/*.md; do
-      [ "$(basename "$f")" = "board.md" ] && cp "$f" "$dest/" || mv "$f" "$dest/"
+    for f in "$WIRE"/*.md; do
+      [ "$(basename "$f")" = "manifest.md" ] && cp "$f" "$dest/" || mv "$f" "$dest/"
     done
-    rm -f "$BOARD"
-    ensure_board
-    echo "archived prior bus into $dest; fresh board ready"
+    rm -f "$MANIFEST"
+    ensure_manifest
+    echo "archived prior wire into $dest; fresh manifest ready"
     ;;
 
   *)
