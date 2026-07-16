@@ -1,4 +1,4 @@
-# Achtopus 🐙
+# 🐙 Achtopus
 
 > An **AI Production Readiness Review** for Claude Code — an evidence-gated, adversarial
 > launch gate. Eight arms, one review: *acht* (eight) subagent personas review a change across
