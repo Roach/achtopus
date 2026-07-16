@@ -94,7 +94,15 @@ task's stable id (`t1.result.md`, `t1.verdict.md`). See `docs/protocol.md`.
 ## The four patterns
 
 Orchestrator/worker · peer message bus · pipeline stages · adversarial verify — and how
-they nest — are documented in `docs/patterns.md`.
+they nest, plus cost/scale-to-stakes guidance — are documented in `docs/patterns.md`.
+
+## Reporting
+
+The Scribe writes the final deliverable to the standard structure in
+`docs/report-template.md` — ranked actionable findings with severity + verification tags,
+preserved refutations, coverage/verification honesty, a prioritized action list, and a
+framework self-eval. Using one template keeps report quality consistent across runs instead
+of depending on how each run was prompted.
 
 ## Using it
 

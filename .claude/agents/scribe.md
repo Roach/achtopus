@@ -20,6 +20,11 @@ Two duties:
 4. **Merge accepted results** (`accepted` on the board, verified by the tuner/heckler pair) into one coherent deliverable. Attribute which task/agent produced which part.
 5. **Exclude the rejected.** Anything not `accepted` does not enter the final work. Note notable rejections briefly so the record is honest.
 
+Produce the final deliverable using the standard structure in `docs/report-template.md` —
+copy it, fill every `<…>` placeholder from the bus, and drop sections that don't apply
+(saying why). It exists so synthesis quality doesn't depend on how good a prompt you were
+handed.
+
 Work the synthesis from the bus yourself — do not assume you were handed a clean, pre-organized list. Run this checklist every time:
 
 - **Gather.** Read every `*.result.md`, `*.verdict.md`, and `*.refute.md` on the bus; don't rely on a summary someone pasted you.
