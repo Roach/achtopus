@@ -141,9 +141,12 @@ agent's `total_cost_usd`, and does the coordination in code:
   exposing *all* tools to a worker causes decision paralysis and token waste — is why each
   persona's `tools:` list in `.claude/agents/*.md` is deliberately narrow (the tuner/heckler
   get read/exec tools, not Write-everything). Keep new personas scoped.
-- **Model-slicing is the cheap default.** The widely-adopted community pattern — top-tier
-  model as the supervisor/plan-author, cheap tier (Haiku) for the worker fan-out — is what
-  the plan's `default_model` + per-task `model` override exist to express.
+- **Model-slicing is opt-in, not assumed.** Every persona defaults to the same tier
+  (Sonnet 5) — the widely-adopted community pattern of a stronger supervisor model plus a
+  cheap tier (e.g. Haiku) for the worker fan-out is available, not automatic: set it via the
+  plan's `default_model` + per-task `model` override, or the driver's own `--model`
+  (task-execution tier) and `--premium-model` (conductor + scribe tier) flags. A uniform
+  default avoids quietly under-powering a domain that turns out to need real judgment.
 
 Run `bin/run examples/plan.example.json --dry-run` to exercise the whole control flow
 (accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost, or

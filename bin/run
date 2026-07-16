@@ -19,7 +19,7 @@ Plan schema (see docs/harness.md and the example under examples/):
     {
       "budget_usd": 5.00,               # hard ceiling; the governor refuses to spawn past it
       "est_agent_usd": 0.15,            # per-agent projection used by the governor
-      "default_model": "claude-haiku-4-5-20251001",
+      "default_model": "claude-sonnet-5",
       "target_repo": "/path/to/repo",   # optional; enables worktree isolation
       "tasks": [
         {"id": "t1", "persona": "soloist", "prompt": "...",
@@ -46,6 +46,12 @@ BUS = os.path.join(REPO_ROOT, "bin", "bus")
 
 VALID_PERSONAS = {"conductor", "composer", "luthier", "soloist", "critic",
                   "tuner", "heckler", "scribe"}
+
+# Two tiers, one default: every persona runs on the same model unless a --model/--premium-model
+# flag or a task's own "model" field says otherwise. Sonnet 5 by default for everyone — the
+# conductor/scribe "premium" tier only needs to be a DIFFERENT (e.g. stronger) model when a run
+# calls for it; most runs don't.
+DEFAULT_MODEL = "claude-sonnet-5"
 
 
 def log(msg):
@@ -363,7 +369,7 @@ def check_scope(task):
 
 def process_task(task, plan, spend, budget, dry_run, lock):
     tid = task["id"]
-    model = task.get("model", plan.get("default_model", "claude-haiku-4-5-20251001"))
+    model = task.get("model", plan.get("default_model", DEFAULT_MODEL))
     est = plan.get("est_agent_usd", 0.15)
 
     # Scope governor — refuse before spawning if the task's own declared target falls
@@ -557,21 +563,27 @@ def main():
     ap.add_argument("plan", nargs="?", help="path to a plan.json (or use --goal)")
     ap.add_argument("--goal", help="have the conductor author the plan from this goal")
     ap.add_argument("--budget", type=float, help="override budget_usd")
+    ap.add_argument("--model", help="override default_model — the tier every task-execution "
+                    f"persona runs on unless a task sets its own 'model' (default: {DEFAULT_MODEL})")
+    ap.add_argument("--premium-model", help="model tier for the conductor's plan-authoring call "
+                    f"and the scribe's final synthesis (default: {DEFAULT_MODEL})")
     ap.add_argument("--dry-run", action="store_true", help="stub agents; test orchestration free")
     ap.add_argument("--concurrency", type=int, default=6)
     args = ap.parse_args()
 
     if bool(args.plan) == bool(args.goal):
         ap.error("provide exactly one of <plan.json> or --goal")
+    premium_model = args.premium_model or DEFAULT_MODEL
     if args.goal:
         plan_path = os.path.join(BUS_DIR, "plan.json")
         os.makedirs(BUS_DIR, exist_ok=True)
-        plan = author_plan(args.goal, plan_path,
-                           "claude-sonnet-5", args.budget)
+        plan = author_plan(args.goal, plan_path, premium_model, args.budget)
     else:
         plan = validate_plan(json.load(open(args.plan, encoding="utf-8")))
         if args.budget is not None:
             plan["budget_usd"] = args.budget
+    if args.model is not None:
+        plan["default_model"] = args.model      # CLI tier flag wins over the plan's own default
     budget = float(plan.get("budget_usd", 1e9))
     spend = {"usd": 0.0}
     tasks = plan["tasks"]
@@ -604,7 +616,7 @@ def main():
         scribe_cap = max(budget - spend["usd"], 0.50)
         run_agent("scribe", f"Synthesize the accepted results ({ids}) into a final report "
                   f"using docs/report-template.md. Read only accepted bus/<id>.result.md files.",
-                  "final", "report.md", plan.get("default_model", "claude-sonnet-5"), REPO_ROOT,
+                  "final", "report.md", premium_model, REPO_ROOT,
                   max_usd=scribe_cap)
 
     n_acc = sum(1 for r in results if r["outcome"] == "accepted")

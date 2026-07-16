@@ -1,7 +1,7 @@
 {
   "budget_usd": 6.00,
   "est_agent_usd": 0.15,
-  "default_model": "claude-haiku-4-5-20251001",
+  "default_model": "claude-sonnet-5",
   "tasks": [
     {
       "id": "d1",
