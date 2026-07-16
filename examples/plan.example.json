@@ -1,0 +1,36 @@
+{
+  "budget_usd": 5.00,
+  "est_agent_usd": 0.15,
+  "default_model": "claude-haiku-4-5-20251001",
+  "tasks": [
+    {
+      "id": "t1",
+      "persona": "soloist",
+      "prompt": "Audit the synchronous request path for the target access-control leak.",
+      "verify": "pair",
+      "model": "claude-opus-4-8",
+      "dry_verdict": "HOLDS"
+    },
+    {
+      "id": "t2",
+      "persona": "soloist",
+      "prompt": "Audit async jobs, exports, and feeds for the same egress class.",
+      "verify": "quorum3",
+      "model": "claude-opus-4-8",
+      "dry_verdict": "HOLDS"
+    },
+    {
+      "id": "t3",
+      "persona": "soloist",
+      "prompt": "Check whether a reported database-error 'blocker' is actually reachable.",
+      "verify": "pair",
+      "dry_verdict": "FAILS"
+    },
+    {
+      "id": "t4",
+      "persona": "soloist",
+      "prompt": "Low-stakes: confirm a doc string matches the flag name.",
+      "verify": "none"
+    }
+  ]
+}

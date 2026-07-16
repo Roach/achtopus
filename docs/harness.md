@@ -104,3 +104,28 @@ someone has to remember.
 
 The bus was the right first primitive; it removed result bloat. The driver is the second:
 it removes the LLM coordinator that the bus can't touch.
+
+## Prototype status
+
+`bin/run <plan.json>` implements this design (stdlib Python, no deps). It reads a JSON plan,
+fans out the personas via `claude -p` (persona body as the system prompt), captures each
+agent's `total_cost_usd`, and does the coordination in code:
+
+- **Budget governor** — refuses to spawn once `spend + est_agent_usd` would breach
+  `budget_usd`. Verified: with a tiny budget, later tasks are skipped and a task whose
+  verifiers get starved falls to **INCONCLUSIVE → not accepted** — running out of money
+  fails *safe*, never silently accepts unverified work.
+- **Programmatic gate** — `decide()` parses the `HOLDS/FAILS/INCONCLUSIVE` (+executed/static
+  tier) and `SURVIVES/REFUTED` verdict files and applies the protocol rules (pair =
+  unanimity, quorum = strict majority, INCONCLUSIVE never accepts) with no LLM in the
+  decision.
+- **Worktree isolation** — a task with `"isolate": true` and a plan `target_repo` runs in
+  its own `git worktree`, handed to the agent, not left to a prose rule.
+- **Board ownership** — only the driver writes the board (`bin/bus status`); agents write
+  their own artifact to an absolute bus path and do no coordination.
+
+Run `bin/run examples/plan.example.json --dry-run` to exercise the whole control flow
+(accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost. The
+live path needs the local `claude` CLI. Remaining work before this is production: stream
+per-wave progress, persist a machine-readable run ledger, and let the `conductor` persona
+emit `plan.json` directly so plan-authoring is the only LLM step on the coordination side.

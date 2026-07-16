@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""
+Acht Opus — deterministic driver (prototype).
+
+Takes the conductor OUT of the LLM hot loop. Coordination — fan-out, budget,
+verify gating, board state, synthesis handoff — is plain Python here; an LLM is
+spawned ONLY at the leaves (the persona agents that do real work). There is no
+growing narration context being re-billed every turn, which is the ~22%-of-run
+conductor cost that docs/harness.md diagnoses.
+
+Usage:
+    bin/run <plan.json> [--dry-run] [--concurrency N] [--verbose]
+
+Plan schema (see docs/harness.md and the example under examples/):
+    {
+      "budget_usd": 5.00,               # hard ceiling; the governor refuses to spawn past it
+      "est_agent_usd": 0.15,            # per-agent projection used by the governor
+      "default_model": "claude-haiku-4-5-20251001",
+      "target_repo": "/path/to/repo",   # optional; enables worktree isolation
+      "tasks": [
+        {"id": "t1", "persona": "soloist", "prompt": "...",
+         "verify": "pair",              # none | single | pair | quorum3 | quorum5
+         "model": "claude-opus-4-8",    # optional per-task override
+         "isolate": true,               # optional; git-worktree the target_repo
+         "dry_verdict": "HOLDS"}        # --dry-run only: HOLDS|FAILS|INCONCLUSIVE
+      ]
+    }
+
+The driver never asks an LLM to decide accept/reject or to summarize between
+waves; those are computed from the bus verdict files by code below.
+"""
+import argparse, concurrent.futures as cf, json, os, re, shutil, subprocess, sys, tempfile, time
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BUS_DIR = os.path.join(REPO_ROOT, "bus")
+AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
+BUS = os.path.join(REPO_ROOT, "bin", "bus")
+
+
+def log(msg):
+    print(f"\033[2m[run]\033[0m {msg}", file=sys.stderr, flush=True)
+
+
+def persona_body(name):
+    """The system prompt for a persona is its agent .md with YAML frontmatter stripped."""
+    path = os.path.join(AGENTS_DIR, f"{name}.md")
+    text = open(path, encoding="utf-8").read()
+    if text.startswith("---"):
+        text = text.split("---", 2)[-1]
+    return text.strip()
+
+
+def bus_state(task_id, role, state):
+    """The DRIVER owns the board — agents never touch it. Deterministic, ~free."""
+    subprocess.run([BUS, "status", task_id, role, state], cwd=REPO_ROOT,
+                   check=False, capture_output=True)
+
+
+# ---- leaf execution: the ONLY place an LLM is spawned --------------------------
+
+def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None):
+    """Spawn one persona agent headless; return (cost_usd, ok). The agent writes its
+    artifact to an ABSOLUTE bus path — it does no coordination, only its own work."""
+    artifact = os.path.join(BUS_DIR, f"{task_id}.{artifact_suffix}")
+    if dry is not None:
+        # Deterministic stub: exercise the orchestration without any API cost.
+        with open(artifact, "w", encoding="utf-8") as f:
+            f.write(dry["body"])
+        return (dry.get("cost", 0.0), True)
+
+    system = persona_body(persona) + (
+        f"\n\n## Driver contract (Acht Opus)\n"
+        f"You are running under the deterministic driver. Write your entire deliverable to the "
+        f"absolute path `{artifact}`. Do NOT edit bus/board.md or run bin/bus — the driver records "
+        f"all state. Coordinate only through files under `{BUS_DIR}`."
+    )
+    cmd = ["claude", "-p", prompt,
+           "--append-system-prompt", system,
+           "--output-format", "json",
+           "--model", model,
+           "--permission-mode", "acceptEdits",
+           "--add-dir", BUS_DIR]
+    if cwd != REPO_ROOT:
+        cmd += ["--add-dir", cwd]
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    cost = 0.0
+    try:
+        cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
+    except Exception:
+        log(f"{task_id}: could not parse cost from agent output (exit {proc.returncode})")
+    return (cost, os.path.exists(artifact))
+
+
+# ---- worktree isolation: handed to the agent, not left to a prose rule ---------
+
+def make_worktree(target_repo, task_id):
+    wt = tempfile.mkdtemp(prefix=f"achtopus-{task_id}-")
+    r = subprocess.run(["git", "-C", target_repo, "worktree", "add", "--detach", wt],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"{task_id}: worktree add failed, falling back to shared checkout: {r.stderr.strip()}")
+        shutil.rmtree(wt, ignore_errors=True)
+        return None
+    return wt
+
+
+def remove_worktree(target_repo, wt):
+    subprocess.run(["git", "-C", target_repo, "worktree", "remove", "--force", wt],
+                   capture_output=True, text=True)
+    shutil.rmtree(wt, ignore_errors=True)
+
+
+# ---- the programmatic gate: NO LLM decides accept/reject -----------------------
+
+VERIFY_PLANS = {
+    "none":    [],
+    "single":  [("tuner", "confirm")],
+    "pair":    [("tuner", "confirm"), ("heckler", "refute")],
+    "quorum3": [("tuner", "confirm")] * 3,
+    "quorum5": [("tuner", "confirm")] * 5,
+}
+
+
+def classify(text, kind):
+    """Parse a verdict/refute file. kind='confirm' -> HOLDS/FAILS/INCONCLUSIVE (+tier);
+    kind='refute' -> SURVIVES/REFUTED."""
+    t = (text or "").upper()
+    if kind == "confirm":
+        tier = "executed" if "EXECUTED" in t else ("static" if "STATIC" in t else "untagged")
+        if re.search(r"\bFAILS\b", t):
+            return ("FAILS", tier)
+        if re.search(r"\bHOLDS\b", t):
+            return ("HOLDS", tier)
+        return ("INCONCLUSIVE", tier)
+    else:
+        if re.search(r"\bREFUTED\b", t):
+            return ("REFUTED", None)
+        if re.search(r"\bSURVIVES\b", t):
+            return ("SURVIVES", None)
+        return ("INCONCLUSIVE", None)
+
+
+def decide(verdicts):
+    """verdicts: list of (kind, verdict, tier). Returns (accepted, reason). Pure code —
+    this is the accept/reject a prose conductor used to fudge."""
+    if not verdicts:
+        return (True, "no-verify (low-stakes: auto-accepted)")
+    confirms = [v for v in verdicts if v[0] == "confirm"]
+    refutes = [v for v in verdicts if v[0] == "refute"]
+    if any(v == "INCONCLUSIVE" for _, v, _ in verdicts):
+        return (False, "INCONCLUSIVE verdict — not cleared (blocked, per protocol G4)")
+    if any(v == "REFUTED" for _, v, _ in refutes):
+        return (False, "heckler REFUTED the claim")
+    if len(confirms) >= 3:  # quorum: strict majority must HOLD
+        holds = sum(1 for _, v, _ in confirms if v == "HOLDS")
+        if holds > len(confirms) / 2:
+            return (True, f"quorum {holds}/{len(confirms)} HOLDS")
+        return (False, f"quorum failed ({holds}/{len(confirms)} HOLDS)")
+    # single or pair: every confirmer must HOLD (and any heckler must SURVIVE)
+    if all(v == "HOLDS" for _, v, _ in confirms) and all(v == "SURVIVES" for _, v, _ in refutes):
+        tiers = {tier for k, v, tier in confirms}
+        note = "HOLDS(static only)" if tiers == {"static"} else "HOLDS"
+        return (True, f"{note}" + (" + SURVIVES" if refutes else ""))
+    return (False, "a confirmer did not return HOLDS")
+
+
+# ---- the coordination loop (deterministic; this is what replaces the LLM) -------
+
+def process_task(task, plan, spend, budget, dry_run, lock):
+    tid = task["id"]
+    model = task.get("model", plan.get("default_model", "claude-haiku-4-5-20251001"))
+    est = plan.get("est_agent_usd", 0.15)
+
+    # Budget governor — a HARD refusal, the thing prose never enforced.
+    with lock:
+        if spend["usd"] + est > budget:
+            log(f"{tid}: SKIPPED — budget governor ({spend['usd']:.2f}+{est:.2f} > {budget:.2f})")
+            bus_state(tid, task["persona"], "blocked")
+            return {"id": tid, "outcome": "budget-skipped", "cost": 0.0}
+
+    cwd = REPO_ROOT
+    wt = None
+    if task.get("isolate") and plan.get("target_repo") and not dry_run:
+        wt = make_worktree(plan["target_repo"], tid)
+        cwd = wt or REPO_ROOT
+
+    try:
+        bus_state(tid, task["persona"], "claimed")
+        dry = {"body": f"{tid} result (dry-run stub)\n", "cost": 0.05} if dry_run else None
+        cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry)
+        with lock:
+            spend["usd"] += cost
+        if not ok:
+            bus_state(tid, task["persona"], "blocked")
+            return {"id": tid, "outcome": "no-result", "cost": cost}
+        bus_state(tid, task["persona"], "done")
+
+        # Verify stage — spawn the configured verifiers, then GATE IN CODE.
+        verify = task.get("verify", "pair")
+        verdicts = []
+        for i, (persona, kind) in enumerate(VERIFY_PLANS.get(verify, [])):
+            with lock:
+                if spend["usd"] + est > budget:
+                    log(f"{tid}: verify {persona} SKIPPED — budget governor")
+                    verdicts.append((kind, "INCONCLUSIVE", None))
+                    continue
+            suffix = "verdict.md" if kind == "confirm" else "refute.md"
+            label = f"{tid}.v{i}"
+            vprompt = (f"Verify this claim from bus/{tid}.result.md. "
+                       f"{'Try to CONFIRM by independent execution' if kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
+                       f"Tag your verdict executed/static.")
+            if dry_run:
+                dv = task.get("dry_verdict", "HOLDS")
+                body = f"{dv}(executed)\n" if kind == "confirm" else \
+                       ("SURVIVES\n" if dv == "HOLDS" else "REFUTED\n")
+                dry = {"body": body, "cost": 0.03}
+            else:
+                dry = None
+            vcost, vok = run_agent(persona, vprompt, label, suffix, model, REPO_ROOT, dry)
+            with lock:
+                spend["usd"] += vcost
+            text = ""
+            vpath = os.path.join(BUS_DIR, f"{label}.{suffix}")
+            if os.path.exists(vpath):
+                text = open(vpath, encoding="utf-8").read()
+            verdicts.append((kind, *classify(text, kind)))
+
+        accepted, reason = decide([(k, v, t) for k, v, t in verdicts])
+        bus_state(tid, task["persona"], "accepted" if accepted else "rejected")
+        return {"id": tid, "outcome": "accepted" if accepted else "rejected",
+                "reason": reason, "cost": cost}
+    finally:
+        if wt:
+            remove_worktree(plan["target_repo"], wt)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("plan")
+    ap.add_argument("--dry-run", action="store_true", help="stub agents; test orchestration free")
+    ap.add_argument("--concurrency", type=int, default=6)
+    args = ap.parse_args()
+
+    plan = json.load(open(args.plan, encoding="utf-8"))
+    budget = float(plan.get("budget_usd", 1e9))
+    spend = {"usd": 0.0}
+    tasks = plan["tasks"]
+
+    subprocess.run([BUS, "init"], cwd=REPO_ROOT, check=False, capture_output=True)
+    log(f"{len(tasks)} tasks, budget ${budget:.2f}, "
+        f"{'DRY-RUN' if args.dry_run else 'LIVE'}, concurrency {args.concurrency}")
+
+    import threading
+    lock = threading.Lock()
+    results = []
+    with cf.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+        futs = {ex.submit(process_task, t, plan, spend, budget, args.dry_run, lock): t
+                for t in tasks}
+        for fut in cf.as_completed(futs):
+            r = fut.result()
+            results.append(r)
+            tag = {"accepted": "\033[32m✓\033[0m", "rejected": "\033[31m✗\033[0m"}.get(
+                r["outcome"], "\033[33m•\033[0m")
+            log(f"{tag} {r['id']}: {r['outcome']}"
+                + (f" — {r.get('reason')}" if r.get("reason") else "")
+                + f"  (${r['cost']:.3f})")
+
+    # Synthesis: the ONE genuinely-LLM coordination step, run once on accepted work.
+    accepted = [r for r in results if r["outcome"] == "accepted"]
+    log(f"synthesis: {len(accepted)} accepted result(s) → scribe (skipped in dry-run)"
+        if args.dry_run else "handing accepted results to scribe")
+    if not args.dry_run and accepted:
+        ids = ",".join(r["id"] for r in accepted)
+        run_agent("scribe", f"Synthesize the accepted results ({ids}) into a final report "
+                  f"using docs/report-template.md. Read only accepted bus/<id>.result.md files.",
+                  "final", "report.md", plan.get("default_model", "claude-opus-4-8"), REPO_ROOT)
+
+    n_acc = sum(1 for r in results if r["outcome"] == "accepted")
+    n_rej = sum(1 for r in results if r["outcome"] == "rejected")
+    n_skip = sum(1 for r in results if r["outcome"] not in ("accepted", "rejected"))
+    print(f"\n\033[1mAcht Opus run complete\033[0m")
+    print(f"  accepted {n_acc}  rejected {n_rej}  skipped/blocked {n_skip}")
+    print(f"  spend ${spend['usd']:.2f} / budget ${budget:.2f}"
+          + ("  \033[31m(governor engaged)\033[0m" if n_skip and spend['usd'] + plan.get('est_agent_usd',0.15) > budget else ""))
+    print(f"  coordination cost: $0.00 — no LLM in the loop (see docs/harness.md)")
+
+
+if __name__ == "__main__":
+    main()
