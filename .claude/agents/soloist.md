@@ -20,3 +20,4 @@ Rules:
 - Return raw substance, not a status update — your result IS the deliverable.
 - Coordinate with peers via the bus (`bus/board.md`), not by guessing what they're doing.
 - Don't fabricate a peer's output; read the bus for it, or `SendMessage` the peer and wait.
+- **Never mutate shared repo state while peers run.** Inspect read-only — `gh pr diff`, `git show`, `git log` — never `gh pr checkout` or branch-switch in a checkout other agents share; you'll stomp their `HEAD` mid-run. If you must build/modify the tree, work in your own `git worktree`.

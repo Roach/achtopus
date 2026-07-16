@@ -88,12 +88,22 @@ cost scales with how many agents you spawn, and the subagent tier dominates. Tha
 is worth it for a security-sensitive domain where a missed evasion has real consequences;
 it is *not* a sensible default for routine refactors or "audit the whole codebase" sweeps.
 
+**Estimate on `agents × turns-per-agent × context-size`, not agent count.** A 30-agent
+audit of a large monorepo ran ~6× over a naive per-agent projection: each agent took many
+turns, and every turn re-sent a large repo context (~90% of the cost was cache read/write
+traffic, not output). Agent count is the dial you *set*; turns × context is what actually
+bills. Gate on the turns×context projection before you fan out — see the conductor's step 1b.
+
 Levers, roughly in order of impact:
 
 - **Right-size the fleet.** A full triad per task is ~3 agents. Reserve it for
   high-consequence work. Low-stakes tasks want a single soloist, or a soloist + one
   verifier, or no separate verify at all. The conductor sizes this per task — don't
   reflexively fan out a triad for everything.
+- **Keep the driving session thin.** If a human-facing session plays conductor and does the
+  coordinating/summarizing inline, every such step re-bills its whole growing transcript —
+  a silent, compounding cost. Run the conductor and scribe as delegated subagents with
+  isolated, disposable context, and coordinate on one-line bus summaries, not full artifacts.
 - **Pick the subagent model tier deliberately.** The subagent tier is where the agent
   count — and therefore most of the cost — lives, so the model you run subagents on is the
   biggest single dial. Running every soloist and verifier at the top tier (as some runs

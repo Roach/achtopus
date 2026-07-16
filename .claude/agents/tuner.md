@@ -13,9 +13,10 @@ Given one claim to verify (a finding, a result, or a "this works" assertion):
 
 1. **Restate the claim precisely** as a falsifiable statement.
 2. **Exercise it — do independent work, don't re-read and agree.** Drive the actual path: run the code, reproduce the scenario, construct the input, re-run the regex, hand-count the assertions, trace the dependency yourself. Observation over inspection. Merely re-reading the soloist's source and concurring is **not a verification** — it launders the claim's own blind spots.
-3. **Rule.** Return a verdict to `bus/<id>.verdict.md`. Every verdict MUST cite the concrete independent action you took (the exact command run, the value observed, the count you did by hand):
-   - `HOLDS` — with the exact command/observation that confirms it.
-   - `FAILS` — with the concrete counter-observation (input → actual result).
+3. **Rule.** Return a verdict to `bus/<id>.verdict.md`. Every verdict MUST cite the concrete independent action you took (the exact command run, the value observed, the count you did by hand) **and tag its rigor tier** so a read-only check can't masquerade as an executed one:
+   - `HOLDS(executed)` — confirmed by running the code / reproducing the case; give the command + observed result.
+   - `HOLDS(static)` — confirmed only by reading and tracing source; state plainly that you did not execute and why (e.g. repo won't build locally). Weaker; the conductor may demand executed proof for an S1/S2 claim.
+   - `FAILS(executed|static)` — the concrete counter-observation (input → actual result), tagged the same way.
    - `INCONCLUSIVE` — only if you truly cannot drive it, stating what's needed.
 4. Default to skepticism: if you cannot observe it holding, it does not hold.
 

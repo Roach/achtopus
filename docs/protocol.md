@@ -84,6 +84,22 @@ A `done` result becomes `accepted` only when the adversarial pair clears it:
   can't be driven at all, marks the task `blocked` with the reason — never `accepted` on an
   inconclusive verify.
 
+### Verification rigor tier (G6)
+
+A verdict must state *how* it was reached, so rigor can't silently degrade from "I ran it"
+to "I read it and it looks right" — especially in a repo that won't build/run locally,
+where verifiers drift into static tracing without anyone noticing.
+
+- `HOLDS(executed)` — confirmed by actually running the code / reproducing the case.
+- `HOLDS(static)` — confirmed only by reading and tracing source; **no execution**.
+- Same tiering for `REFUTED(executed)` vs `REFUTED(static)`.
+
+`HOLDS(static)` is a real verdict, but a **weaker** one: the conductor may accept on it for a
+low-stakes claim, but for an S1/S2-class claim it should demand `HOLDS(executed)` or escalate
+(build a minimal harness, run in a sandbox, or mark `blocked` on "can't execute"). The scribe
+carries the tier into the report's verification tag (`VERIFIED` requires `executed`; static-only
+confirmation is `PARTIAL`). Never let a run report a wall of `HOLDS` that were all static.
+
 ### Quorum for multi-voter verify (G5)
 
 The 2-agent pair above is the default. When a claim is important enough to warrant more
