@@ -71,9 +71,22 @@ def persona_body(name):
 
 
 def bus_state(task_id, role, state):
-    """The DRIVER owns the board — agents never touch it. Deterministic, ~free."""
-    subprocess.run([BUS, "status", task_id, role, state], cwd=REPO_ROOT,
-                   check=False, capture_output=True)
+    """The DRIVER owns the board — agents never touch it. Deterministic, ~free.
+
+    "claimed" and the terminal states (done/accepted/rejected/blocked) are two different
+    bin/bus subcommands with different arities ("claim <id> <role>" vs "status <id> <state>",
+    the latter deriving owner from the earlier claim) — every call here used to go through
+    "status" with a bogus 3-arg form, which bin/bus rejects ("bad state: <role>") and which
+    capture_output=True + check=False silently swallowed. bus/board.md has been getting zero
+    state lines from any run as a result."""
+    if state == "claimed":
+        cmd = [BUS, "claim", task_id, role]
+    else:
+        cmd = [BUS, "status", task_id, state]
+    proc = subprocess.run(cmd, cwd=REPO_ROOT, check=False, capture_output=True, text=True)
+    if proc.returncode != 0:
+        log(f"{task_id}: board write failed ({' '.join(cmd[1:])}): "
+            + (proc.stdout or proc.stderr or "").strip()[:200])
 
 
 def context_brief_note():

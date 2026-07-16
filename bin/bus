@@ -48,9 +48,24 @@ require_id() {
 sanitize() { printf '%s' "$1" | tr '\r\n' '  '; }
 
 # Atomic advisory lock via mkdir (portable; macOS ships no flock). Held for the
-# read-modify-write in claim so two concurrent claimers can't both pass the guard.
-lock()   { local n=0; until mkdir "$LOCK" 2>/dev/null; do sleep 0.05; n=$((n+1)); [ "$n" -gt 200 ] && { echo "bus: lock timeout"; exit 4; }; done; }
-unlock() { rmdir "$LOCK" 2>/dev/null || true; }
+# read-modify-write in claim so two concurrent claimers can't both pass the guard. Records
+# the holder's PID so a lock left behind by a hard-killed process (e.g. a driver run that
+# got SIGKILLed mid-claim) is detected as stale and cleared rather than wedging every future
+# claim for good — seen live: a killed background run left $LOCK on disk and every
+# concurrent claim in the next run blocked the full timeout before failing.
+lock() {
+  local n=0
+  until mkdir "$LOCK" 2>/dev/null; do
+    local holder; holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$LOCK"; continue   # holder process is gone — stale lock, clear and retry now
+    fi
+    sleep 0.05; n=$((n+1))
+    [ "$n" -gt 200 ] && { echo "bus: lock timeout"; exit 4; }
+  done
+  echo $$ > "$LOCK/pid"
+}
+unlock() { rm -rf "$LOCK" 2>/dev/null || true; }
 
 ensure_board() {
   if [ ! -f "$BOARD" ]; then
