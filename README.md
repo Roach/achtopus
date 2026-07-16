@@ -85,8 +85,11 @@ bin/run --goal "PRR for <service/change>: review it for launch readiness" --budg
 The conductor authors a `plan.json` whose tasks are the readiness domains; the driver fans
 out the reviewers, enforces the budget, gates accept/reject in code (evidence required to
 pass), and hands the cleared results to the scribe for the verdict. Everything after the plan
-is deterministic — no LLM narrating in the coordination loop. See `docs/harness.md`. Try it
-free: `bin/run examples/prr-plan.example.json --dry-run`.
+is deterministic — no LLM narrating in the coordination loop. A task that reads another
+task's result (`depends_on`, or auto-inferred from its prompt) has its dispatch held until
+that dependency actually posts, so domain reviews and their verifiers never race ahead of the
+work they're reading. See `docs/harness.md`. Try it free:
+`bin/run examples/prr-plan.example.json --dry-run`.
 
 Or drive it from a Claude Code session:
 
