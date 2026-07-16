@@ -529,7 +529,13 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                 dry = None
             with lock:
                 vcap = max(budget - spend["usd"], est)
-            vcost, vok = run_agent(persona, vprompt, label, suffix, model, REPO_ROOT, dry, max_usd=vcap)
+            # Verify runs in the SAME cwd as the task it's checking (worktree or REPO_ROOT) —
+            # a verifier told to "confirm by independent execution" against a target repo can't
+            # do that if it's sandboxed to the achtopus repo while the task it's verifying was
+            # isolated elsewhere. Seen live: an isolated task produced a good result, but its
+            # tuner verdict came back INCONCLUSIVE because it had no filesystem access to the
+            # repo it was asked to independently re-derive facts from.
+            vcost, vok = run_agent(persona, vprompt, label, suffix, model, cwd, dry, max_usd=vcap)
             with lock:
                 spend["usd"] += vcost
             text = ""
