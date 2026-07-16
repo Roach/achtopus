@@ -10,7 +10,7 @@ specialized reviewers across the domains that decide whether a service is safe t
 observability, rollback safety, dependencies, data migrations, security, capacity, on-call —
 adversarially verifies each finding, and synthesizes a scored launch-readiness report. The
 whole review is the octopus's eight arms coordinating through a shared, greppable file
-**bus**, so a human can always reconstruct what was checked, what was challenged, and why the
+**wire**, so a human can always reconstruct what was checked, what was challenged, and why the
 gate opened or held.
 
 ## Why a PRR needs this
@@ -28,7 +28,7 @@ failure modes are structural — not something a longer checklist fixes:
    owner to every readiness surface, so an unowned surface is a visible gap, not a silent one.
 3. **"Ready" is a vibe, not a verdict.** Go/no-go often comes down to whoever is loudest in
    the room. Achtopus produces a per-domain scorecard (✅ / ⚠️ / 🔴) and a fail-closed rule
-   — **no red at launch** — with every rating traceable to evidence on the bus.
+   — **no red at launch** — with every rating traceable to evidence on the wire.
 4. **The reasoning evaporates.** When the review lives in a chat thread or a parent agent's
    context, it can't be grepped, handed off, or reconstructed after the fact — exactly when a
    post-incident review needs it most. Here the whole review is markdown files you can `cat`.
@@ -48,8 +48,8 @@ and an honest coverage statement (what was verified vs. what still needs a human
 ## The review, eight arms
 
 The engine is the octopus's eight arms — Claude Code subagent personas that coordinate
-through a shared file bus with no central brain micromanaging each move. Each arm owns its
-domain and stays in sync through the bus, the way a real octopus's arms each carry their own
+through a shared file wire with no central brain micromanaging each move. Each arm owns its
+domain and stays in sync through the wire, the way a real octopus's arms each carry their own
 neurons and coordinate through a shared medium rather than a single controller.
 
 | Display name | Agent | Role in a PRR |
@@ -61,7 +61,7 @@ neurons and coordinate through a shared medium rather than a single controller.
 | 🧐 The Critic | `critic` | Gate rubric coverage — did the domain answer every A–K question before verify runs |
 | ✊ Grip | `tuner` | Confirm a finding — grip it and try to hold it up (independent observation) |
 | 🫳 Release | `heckler` | Refute a finding — try to make it let go (a different failure mode) |
-| 🖋️ The Ink | `scribe` | Keep the board; write the launch-readiness verdict — the ink the octopus leaves behind |
+| 🖋️ The Ink | `scribe` | Keep the manifest; write the launch-readiness verdict — the ink the octopus leaves behind |
 
 Full definitions in `.claude/agents/`.
 
@@ -105,18 +105,18 @@ bin/install /path/to/proj   # symlink into one project's .claude/agents
 bin/install --uninstall     # remove them
 ```
 
-## The bus
+## The wire
 
-The filesystem *is* the coordination record (`bus/`). No daemon, no database — if you can
+The filesystem *is* the coordination record (`wire/`). No daemon, no database — if you can
 `cat` it, you know the state of the review.
 
 ```bash
-bin/bus init                    # start a review
-bin/bus claim   d1 soloist      # claim a domain (atomic; guards double-review)
-bin/bus status  d1 done         # advance its state (keeps the owner's role)
-bin/bus board                   # read the ledger
-bin/bus stale   30              # list domains stuck in `claimed` > 30 min
-bin/bus clear                   # archive and reset
+bin/wire init                # start a review
+bin/wire claim   d1 soloist  # claim a domain (atomic; guards double-review)
+bin/wire status  d1 done     # advance its state (keeps the owner's role)
+bin/wire manifest            # read the ledger
+bin/wire stale   30          # list domains stuck in `claimed` > 30 min
+bin/wire clear               # archive and reset
 ```
 
 Every artifact — plan, per-domain findings, verdicts, refutations — is a markdown file named
@@ -124,7 +124,7 @@ by the domain's stable id (`d1.result.md`, `d1.verdict.md`). See `docs/protocol.
 
 ## What "good" looks like
 
-1. **Auditability** — for any review, a person can open `bus/` and reconstruct which domains
+1. **Auditability** — for any review, a person can open `wire/` and reconstruct which domains
    were checked, what was challenged, what cleared, and why the gate opened, without reading a
    single agent transcript.
 2. **Fail-closed gating** — no domain is marked ready without surviving an independent attempt
@@ -141,7 +141,7 @@ by the domain's stable id (`d1.result.md`, `d1.verdict.md`). See `docs/protocol.
 - **Not a replacement for the human gate.** It automates the code/config-verifiable domains
   and drafts the rest; on-call staffing, threat-model adequacy, and final sign-off remain
   human. It checks that those artifacts *exist and are wired*, never that they are *sufficient*.
-- **Not a general workflow engine or scheduler.** No DAG runtime, no cron. The bus is a review
+- **Not a general workflow engine or scheduler.** No DAG runtime, no cron. The wire is a review
   record and a protocol, not an execution platform.
 - **Not tied to one org's checklist.** The public rubric is the industry-standard PRR; specific
   org criteria are configuration layered on top, never baked in.
@@ -149,7 +149,7 @@ by the domain's stable id (`d1.result.md`, `d1.verdict.md`). See `docs/protocol.
 ## Under the hood
 
 The review engine is a general multi-agent coordination framework — orchestrator/worker,
-peer message bus, pipeline stages, and adversarial verify (`docs/patterns.md`), driven by a
+peer message wire, pipeline stages, and adversarial verify (`docs/patterns.md`), driven by a
 deterministic harness with a budget governor and a programmatic evidence gate
 (`docs/harness.md`, `docs/protocol.md`). The PRR is what it's *for*; the engine is how it
 stays trustworthy and cheap.

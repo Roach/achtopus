@@ -16,8 +16,8 @@ whole run.** That thread alone out-produced all 30 subagents combined:
 | Conductor cache **read** | $27.43 | ~18.3M tokens of its own transcript re-sent across 173 turns |
 | Conductor cache **write** | $16.83 | growing context (peaked ~189K) re-cached each turn |
 
-The bus did its job: raw worker results stayed out of the conductor's context (uncached
-input ≈0). But the bus only solves **result bloat**. It does nothing about
+The wire did its job: raw worker results stayed out of the conductor's context (uncached
+input ≈0). But the wire only solves **result bloat**. It does nothing about
 **coordination-turn bloat** — the cost of an LLM sitting in the loop, re-sending its whole
 accumulated narration on every single agent event.
 
@@ -59,14 +59,14 @@ Enforcement gaps need a **driver**, not better wording.
 
 The fix is to make **coordination deterministic code** and reserve LLM agents for the work
 that actually needs judgment (soloist, luthier, tuner, heckler, critic, scribe). The
-driver does the parts that are pure control flow — fan-out, poll the bus, apply the
+driver does the parts that are pure control flow — fan-out, poll the wire, apply the
 accept/reject gate, sequence stages, enforce the budget — and *none of that costs an LLM
 turn*. There is no growing narration context because the coordinator isn't a language
 model.
 
 What the driver owns (deterministic, ~zero token cost):
 1. **Spawn** N workers from the plan, each in its **own git worktree** automatically.
-2. **Poll** the bus / collect structured results — no LLM summarizing between events.
+2. **Poll** the wire / collect structured results — no LLM summarizing between events.
 3. **Gate** programmatically: read the `HOLDS/FAILS` + `SURVIVES/REFUTED` verdict files,
    apply the quorum rule in code, mark accepted/rejected. No conductor prose per finding.
 4. **Budget governor:** track spend; refuse to spawn once projected `agents×turns×context`
@@ -94,7 +94,7 @@ someone has to remember.
      much of the $88 without the full driver. (a) **Run the conductor on a cheaper tier
      (Haiku/Sonnet)** — it routes and gates, it doesn't do deep judgment; ~$44 of Opus
      *output* for coordination is overkill. (b) **Batch-collect per wave, narrate tersely** —
-     poll the board once per fan-out wave instead of emitting play-by-play on every
+     poll the manifest once per fan-out wave instead of emitting play-by-play on every
      completion; most of the $43.50 output was human-visibility prose that an unattended run
      doesn't need. These are stopgaps — they shrink the LLM-in-loop cost; only the driver
      removes it.
@@ -102,8 +102,8 @@ someone has to remember.
    collapses toward the cost of the plan-authoring call plus one scribe synthesis — the
    173 turns of re-billed narration simply stop existing.
 
-The bus was the right first primitive; it removed result bloat. The driver is the second:
-it removes the LLM coordinator that the bus can't touch.
+The wire was the right first primitive; it removed result bloat. The driver is the second:
+it removes the LLM coordinator that the wire can't touch.
 
 ## Prototype status
 
@@ -121,11 +121,11 @@ agent's `total_cost_usd`, and does the coordination in code:
   decision.
 - **Worktree isolation** — a task with `"isolate": true` and a plan `target_repo` runs in
   its own `git worktree`, handed to the agent, not left to a prose rule.
-- **Board ownership** — only the driver writes the board (`bin/bus status`); agents write
-  their own artifact to an absolute bus path and do no coordination.
+- **Manifest ownership** — only the driver writes the manifest (`bin/wire status`); agents write
+  their own artifact to an absolute wire path and do no coordination.
 
 - **Plan authoring is the only coordination LLM call.** `bin/run --goal "<what to do>"`
-  spawns the `conductor` once to author `bus/plan.json` (against a strict, driver-injected
+  spawns the `conductor` once to author `wire/plan.json` (against a strict, driver-injected
   JSON contract — surface inventory, right-sized verify, a budget from its projection), then
   validates and executes it deterministically. Everything after the plan is code. This closes
   the loop: the expensive 173-turn narrating conductor is replaced by a single plan-authoring

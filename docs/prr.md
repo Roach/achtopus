@@ -107,7 +107,7 @@ which is which — see the coverage section of the template.
 
 Rate each domain and tally:
 
-- ✅ **green** — ready; evidence on the bus.
+- ✅ **green** — ready; evidence on the wire.
 - ⚠️ **warning** — a tracked, non-blocking condition to close (soon, not necessarily pre-launch).
 - 🔴 **red** — a launch blocker.
 

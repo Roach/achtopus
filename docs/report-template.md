@@ -3,12 +3,12 @@
 The Ink fills this out at the finale of a Production Readiness Review. Copy it verbatim,
 replace every `<…>` placeholder, and delete any section that genuinely does not apply (say
 why). Keep it scannable and greppable: one domain/finding per block, stable ids, concrete
-over abstract. Every rating in the report must trace to a bus artifact
-(`*.result.md` / `*.verdict.md` / `*.refute.md`) — if it isn't on the bus, it doesn't go in
+over abstract. Every rating in the report must trace to a wire artifact
+(`*.result.md` / `*.verdict.md` / `*.refute.md`) — if it isn't on the wire, it doesn't go in
 the report.
 
 **Scorecard ratings** (per domain):
-✅ `green` (ready; evidence on the bus) · ⚠️ `warning` (tracked, non-blocking condition) ·
+✅ `green` (ready; evidence on the wire) · ⚠️ `warning` (tracked, non-blocking condition) ·
 🔴 `red` (launch blocker). **The rule: nothing red at launch.**
 
 **Severity scale** (rank blockers/conditions by this):
@@ -43,12 +43,12 @@ gating it.>
 
 ## 2. Domain scorecard
 
-One row per readiness domain reviewed (see `docs/prr.md`). Rating traces to the bus artifact.
+One row per readiness domain reviewed (see `docs/prr.md`). Rating traces to the wire artifact.
 
 | Domain | Rating | Verification | Evidence / note | Artifact |
 |---|---|---|---|---|
-| B. Observability | ✅ / ⚠️ / 🔴 | VERIFIED / PARTIAL / … | <one line + the proof> | `bus/d2.result.md` |
-| E. Rollback & deploy | … | … | … | `bus/d5.result.md` |
+| B. Observability | ✅ / ⚠️ / 🔴 | VERIFIED / PARTIAL / … | <one line + the proof> | `wire/d2.result.md` |
+| E. Rollback & deploy | … | … | … | `wire/d5.result.md` |
 | … | | | | |
 
 Domains **not reviewed** (out of scope or unowned): <list, with why> — never let an omitted

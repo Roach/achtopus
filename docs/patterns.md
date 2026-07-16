@@ -1,45 +1,45 @@
 # Achtopus — Coordination Patterns
 
 Four patterns, one octopus of eight arms. Each pattern is a way of wiring the same arms
-through the same bus.
+through the same wire.
 
 ## 1. Orchestrator / worker (fan-out)
 
 **Personas:** 🐙 conductor → 🔦 soloist ×N → 🖋️ scribe
 
 ```
-conductor: decompose → bus/plan.md (t1..tN, marked independent)
+conductor: decompose → wire/plan.md (t1..tN, marked independent)
 conductor: spawn N soloists in ONE message (concurrent)
-soloist ti: claim ti → work → bus/ti.result.md → status done
-conductor: poll board; route non-trivial results to verify
+soloist ti: claim ti → work → wire/ti.result.md → status done
+conductor: poll manifest; route non-trivial results to verify
 scribe: synthesize accepted results
 ```
 
 Use when the work splits into independent chunks. The win is parallelism + a shared
 ledger so nothing is lost or duplicated.
 
-## 2. Peer message bus (no boss)
+## 2. Peer message wire (no boss)
 
-**Personas:** 🔦 soloist ×N as peers, 🖋️ scribe keeps `board.md`
+**Personas:** 🔦 soloist ×N as peers, 🖋️ scribe keeps `manifest.md`
 
 ```
-each soloist: claim a task on bus/board.md (claim guard prevents collisions)
-peers coordinate by reading/writing the board — not by asking a lead
+each soloist: claim a task on wire/manifest.md (claim guard prevents collisions)
+peers coordinate by reading/writing the manifest — not by asking a lead
 scribe: reconcile conflicts, flag overlaps, keep one source of truth
 ```
 
 Use when agents are equals working a shared space and a central orchestrator would just
-be a bottleneck. The board is the whole coordination surface.
+be a bottleneck. The manifest is the whole coordination surface.
 
 ## 3. Pipeline stages
 
 **Personas:** 🧭 composer → 🔦/🔧 soloist/luthier → 🧐 critic (→ ✊ tuner)
 
 ```
-composer: PRD/diff → ONE bus/context.md (shared grounding, read by every other arm)
-soloist/luthier: do the domain's work (review end-to-end, or exercise it hands-on) → bus/<id>.result.md
-critic:   coverage-gate the result against its domain's rubric → bus/<id>.coverage.md
-tuner/heckler: verify the underlying claims → bus/<id>.verdict.md / .refute.md
+composer: PRD/diff → ONE wire/context.md (shared grounding, read by every other arm)
+soloist/luthier: do the domain's work (review end-to-end, or exercise it hands-on) → wire/<id>.result.md
+critic:   coverage-gate the result against its domain's rubric → wire/<id>.coverage.md
+tuner/heckler: verify the underlying claims → wire/<id>.verdict.md / .refute.md
 ```
 
 The composer runs once, first, before any domain reviewer starts — it is not a per-item
@@ -73,7 +73,7 @@ The patterns nest. A typical rich run:
 conductor decomposes (pattern 1)
   → each chunk runs the pipeline (pattern 3)
     → every load-bearing result goes through adversarial verify (pattern 4)
-  → peers reconcile shared state via the board (pattern 2)
+  → peers reconcile shared state via the manifest (pattern 2)
 → scribe synthesizes only the accepted work
 ```
 
@@ -112,7 +112,7 @@ Levers, roughly in order of impact:
 - **Keep the driving session thin.** If a human-facing session plays conductor and does the
   coordinating/summarizing inline, every such step re-bills its whole growing transcript —
   a silent, compounding cost. Run the conductor and scribe as delegated subagents with
-  isolated, disposable context, and coordinate on one-line bus summaries, not full artifacts.
+  isolated, disposable context, and coordinate on one-line wire summaries, not full artifacts.
 - **Pick the subagent model tier deliberately.** The subagent tier is where the agent
   count — and therefore most of the cost — lives, so the model you run subagents on is the
   biggest single dial. Running every soloist and verifier at the top tier (as some runs

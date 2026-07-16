@@ -3,7 +3,7 @@
 Achtopus — deterministic driver (prototype).
 
 Takes the conductor OUT of the LLM hot loop. Coordination — fan-out, budget,
-verify gating, board state, synthesis handoff — is plain Python here; an LLM is
+verify gating, manifest state, synthesis handoff — is plain Python here; an LLM is
 spawned ONLY at the leaves (the persona agents that do real work). There is no
 growing narration context being re-billed every turn, which is the ~22%-of-run
 conductor cost that docs/harness.md diagnoses.
@@ -12,7 +12,7 @@ Usage:
     bin/run <plan.json> [--dry-run] [--concurrency N]
     bin/run --goal "<what to do>" [--budget 5.00] [--dry-run]   # conductor authors the plan
 
-In --goal mode the ONLY LLM coordination call is the conductor authoring bus/plan.json;
+In --goal mode the ONLY LLM coordination call is the conductor authoring wire/plan.json;
 everything after (fan-out, budget, gating, synthesis) is deterministic code.
 
 Plan schema (see docs/harness.md and the example under examples/):
@@ -37,14 +37,14 @@ Plan schema (see docs/harness.md and the example under examples/):
     }
 
 The driver never asks an LLM to decide accept/reject or to summarize between
-waves; those are computed from the bus verdict files by code below.
+waves; those are computed from the wire verdict files by code below.
 """
 import argparse, concurrent.futures as cf, fnmatch, json, os, re, shutil, subprocess, sys, tempfile, time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUS_DIR = os.path.join(REPO_ROOT, "bus")
+WIRE_DIR = os.path.join(REPO_ROOT, "wire")
 AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
-BUS = os.path.join(REPO_ROOT, "bin", "bus")
+WIRE = os.path.join(REPO_ROOT, "bin", "wire")
 
 
 VALID_PERSONAS = {"conductor", "composer", "luthier", "soloist", "critic",
@@ -70,32 +70,32 @@ def persona_body(name):
     return text.strip()
 
 
-def bus_state(task_id, role, state):
-    """The DRIVER owns the board — agents never touch it. Deterministic, ~free.
+def wire_state(task_id, role, state):
+    """The DRIVER owns the manifest — agents never touch it. Deterministic, ~free.
 
     "claimed" and the terminal states (done/accepted/rejected/blocked) are two different
-    bin/bus subcommands with different arities ("claim <id> <role>" vs "status <id> <state>",
+    bin/wire subcommands with different arities ("claim <id> <role>" vs "status <id> <state>",
     the latter deriving owner from the earlier claim) — every call here used to go through
-    "status" with a bogus 3-arg form, which bin/bus rejects ("bad state: <role>") and which
-    capture_output=True + check=False silently swallowed. bus/board.md has been getting zero
+    "status" with a bogus 3-arg form, which bin/wire rejects ("bad state: <role>") and which
+    capture_output=True + check=False silently swallowed. wire/manifest.md has been getting zero
     state lines from any run as a result."""
     if state == "claimed":
-        cmd = [BUS, "claim", task_id, role]
+        cmd = [WIRE, "claim", task_id, role]
     else:
-        cmd = [BUS, "status", task_id, state]
+        cmd = [WIRE, "status", task_id, state]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, check=False, capture_output=True, text=True)
     if proc.returncode != 0:
-        log(f"{task_id}: board write failed ({' '.join(cmd[1:])}): "
+        log(f"{task_id}: manifest write failed ({' '.join(cmd[1:])}): "
             + (proc.stdout or proc.stderr or "").strip()[:200])
 
 
 def context_brief_note():
     """If the composer (the Surveyor arm) has written the shared grounding brief to
-    bus/context.md for this run, point the caller at it instead of re-deriving the same
-    PRD read / diff — reuse the existing bus mechanism, don't invent a new one. Empty
+    wire/context.md for this run, point the caller at it instead of re-deriving the same
+    PRD read / diff — reuse the existing wire mechanism, don't invent a new one. Empty
     string (no-op) when no brief exists for this run."""
-    if os.path.exists(os.path.join(BUS_DIR, "context.md")):
-        return (" Read `bus/context.md` first — it is the shared PRD/diff/changed-files "
+    if os.path.exists(os.path.join(WIRE_DIR, "context.md")):
+        return (" Read `wire/context.md` first — it is the shared PRD/diff/changed-files "
                 "context brief for this run; don't re-derive that context yourself.")
     return ""
 
@@ -116,11 +116,11 @@ def _log_failure(label, proc):
 
 def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, max_usd=None):
     """Spawn one persona agent headless; return (cost_usd, ok). The agent writes its
-    artifact to an ABSOLUTE bus path — it does no coordination, only its own work.
+    artifact to an ABSOLUTE wire path — it does no coordination, only its own work.
     `max_usd`, when given, is a HARD per-call spend cap (--max-budget-usd) — the pre-spawn
     budget governor in process_task is only a projection; this is the backstop that actually
     stops a single runaway call from blowing past it."""
-    artifact = os.path.join(BUS_DIR, f"{task_id}.{artifact_suffix}")
+    artifact = os.path.join(WIRE_DIR, f"{task_id}.{artifact_suffix}")
     if dry is not None:
         # Deterministic stub: exercise the orchestration without any API cost.
         with open(artifact, "w", encoding="utf-8") as f:
@@ -130,15 +130,15 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
     system = persona_body(persona) + (
         f"\n\n## Driver contract (Achtopus)\n"
         f"You are running under the deterministic driver. Write your entire deliverable to the "
-        f"absolute path `{artifact}`. Do NOT edit bus/board.md or run bin/bus — the driver records "
-        f"all state. Coordinate only through files under `{BUS_DIR}`."
+        f"absolute path `{artifact}`. Do NOT edit wire/manifest.md or run bin/wire — the driver records "
+        f"all state. Coordinate only through files under `{WIRE_DIR}`."
     )
     cmd = ["claude", "-p", prompt,
            "--append-system-prompt", system,
            "--output-format", "json",
            "--model", model,
            "--permission-mode", "acceptEdits",
-           "--add-dir", BUS_DIR]
+           "--add-dir", WIRE_DIR]
     if cwd != REPO_ROOT:
         cmd += ["--add-dir", cwd]
     if max_usd is not None:
@@ -288,7 +288,7 @@ def tally_scorecard(results):
     """Deterministic scorecard tally + launch-rule verdict — a sibling to decide(): pure
     code, same reasoning docs/prr.md describes ("the scribe tallies the scorecard and
     applies the launch rule") but computed here instead of reasoned out by an LLM. Scans
-    each ACCEPTED task's bus/<id>.result.md for a rating marker (see extract_rating) and
+    each ACCEPTED task's wire/<id>.result.md for a rating marker (see extract_rating) and
     applies the mechanical "no red at launch" rule:
       any red -> NO-GO; no red but any warning -> GO-WITH-CONDITIONS; all green -> GO.
     Returns None (never raises) when no accepted result carries a rating marker at all —
@@ -298,7 +298,7 @@ def tally_scorecard(results):
     for r in results:
         if r.get("outcome") != "accepted":
             continue
-        path = os.path.join(BUS_DIR, f"{r['id']}.result.md")
+        path = os.path.join(WIRE_DIR, f"{r['id']}.result.md")
         if not os.path.exists(path):
             continue
         try:
@@ -332,7 +332,7 @@ def run_coverage_gate(task, model, dry_run, max_usd=None):
     not dead weight sitting unwired."""
     tid = task["id"]
     domain_hint = task.get("domain", task["prompt"][:120])
-    cprompt = (f"Coverage gate for bus/{tid}.result.md. Domain/claim context: {domain_hint!r}. "
+    cprompt = (f"Coverage gate for wire/{tid}.result.md. Domain/claim context: {domain_hint!r}. "
                f"Using the matching domain's rubric questions in docs/prr.md's A-K list, check "
                f"whether the result answered every question for that domain, or whether some "
                f"were silently unaddressed. Do not judge whether the answers given are correct — "
@@ -342,7 +342,7 @@ def run_coverage_gate(task, model, dry_run, max_usd=None):
            if dry_run else None)
     cost, ok = run_agent("critic", cprompt, tid, "coverage.md", model, REPO_ROOT, dry, max_usd=max_usd)
     text = ""
-    cpath = os.path.join(BUS_DIR, f"{tid}.coverage.md")
+    cpath = os.path.join(WIRE_DIR, f"{tid}.coverage.md")
     if os.path.exists(cpath):
         text = open(cpath, encoding="utf-8").read()
     gap = bool(re.search(r"^COVERAGE:\s*gaps", text, re.I | re.M))
@@ -393,14 +393,14 @@ def process_task(task, plan, spend, budget, dry_run, lock):
     scope_ok, scope_reason = check_scope(task)
     if not scope_ok:
         log(f"{tid}: BLOCKED — scope governor ({scope_reason})")
-        bus_state(tid, task["persona"], "blocked")
+        wire_state(tid, task["persona"], "blocked")
         return {"id": tid, "outcome": "scope-blocked", "reason": scope_reason, "cost": 0.0}
 
     # Budget governor — a HARD refusal, the thing prose never enforced.
     with lock:
         if spend["usd"] + est > budget:
             log(f"{tid}: SKIPPED — budget governor ({spend['usd']:.2f}+{est:.2f} > {budget:.2f})")
-            bus_state(tid, task["persona"], "blocked")
+            wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "budget-skipped", "cost": 0.0}
 
     cwd = REPO_ROOT
@@ -410,7 +410,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         cwd = wt or REPO_ROOT
 
     try:
-        bus_state(tid, task["persona"], "claimed")
+        wire_state(tid, task["persona"], "claimed")
         dry = {"body": f"{tid} result (dry-run stub)\n", "cost": 0.05} if dry_run else None
         with lock:
             headroom = max(budget - spend["usd"], est)
@@ -419,9 +419,9 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         with lock:
             spend["usd"] += cost
         if not ok:
-            bus_state(tid, task["persona"], "blocked")
+            wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "no-result", "cost": cost}
-        bus_state(tid, task["persona"], "done")
+        wire_state(tid, task["persona"], "done")
 
         # Coverage gate — critic checks rubric coverage BEFORE tuner/heckler verify.
         # A gap is a note on the outcome, not a block: tuner/heckler still own accept/reject.
@@ -450,7 +450,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                     continue
             suffix = "verdict.md" if kind == "confirm" else "refute.md"
             label = f"{tid}.v{i}"
-            vprompt = (f"Verify this claim from bus/{tid}.result.md. "
+            vprompt = (f"Verify this claim from wire/{tid}.result.md. "
                        f"{'Try to CONFIRM by independent execution' if kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
                        f"Tag your verdict executed/static." + context_brief_note())
             if dry_run:
@@ -471,7 +471,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             with lock:
                 spend["usd"] += vcost
             text = ""
-            vpath = os.path.join(BUS_DIR, f"{label}.{suffix}")
+            vpath = os.path.join(WIRE_DIR, f"{label}.{suffix}")
             if os.path.exists(vpath):
                 text = open(vpath, encoding="utf-8").read()
             cv = classify(text, kind)
@@ -480,7 +480,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             verdicts.append((kind, *cv))
 
         accepted, reason = decide([(k, v, t) for k, v, t in verdicts])
-        bus_state(tid, task["persona"], "accepted" if accepted else "rejected")
+        wire_state(tid, task["persona"], "accepted" if accepted else "rejected")
         if coverage_note:
             reason = f"{reason}; {coverage_note}"
         return {"id": tid, "outcome": "accepted" if accepted else "rejected",
@@ -493,7 +493,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
 # ---- plan validation: a malformed plan fails loudly, never mid-run ------------
 
 def infer_deps(task, all_ids):
-    """Auto-detect same-run task ids a task's prompt tells it to read (e.g. "read bus/t2.result.md",
+    """Auto-detect same-run task ids a task's prompt tells it to read (e.g. "read wire/t2.result.md",
     or a "t1..t5" range shorthand). A safety net for plans that reference other tasks' output
     without declaring "depends_on" explicitly — without this, concurrent dispatch can spawn a
     task before the results it's told to read even exist yet (seen live: a coverage/synthesis
@@ -554,7 +554,7 @@ def validate_plan(plan):
 PLAN_CONTRACT = """
 
 ## Deterministic-driver mode (you are authoring a plan, not running it)
-Emit a machine-readable plan to the ABSOLUTE path `{plan_path}` and NOTHING to the board.
+Emit a machine-readable plan to the ABSOLUTE path `{plan_path}` and NOTHING to the manifest.
 Write ONE JSON object, no prose around it, matching exactly:
   {{"budget_usd": <float>, "est_agent_usd": <float>, "default_model": "<model-id>",
     "target_repo": "<abs path or omit>",
@@ -565,7 +565,7 @@ Write ONE JSON object, no prose around it, matching exactly:
                "target": "<optional path this task intends to touch>",
                "depends_on": ["<optional list of task ids that must finish first>"]}}]}}
 Rules you must honor while authoring:
-- If a task's prompt tells it to read another task's bus/<id>.result.md output, you MUST list
+- If a task's prompt tells it to read another task's wire/<id>.result.md output, you MUST list
   that id in `depends_on` — the driver dispatches concurrently by default and will NOT wait for
   another task to finish unless told to. A task that reads output that doesn't exist yet will
   wrongly report it as missing, not merely late.
@@ -610,7 +610,7 @@ def author_plan(goal, plan_path, model, budget):
               f"The task to plan for: {goal}")
     cmd = ["claude", "-p", prompt, "--append-system-prompt", system,
            "--output-format", "json", "--model", model,
-           "--permission-mode", "acceptEdits", "--add-dir", BUS_DIR,
+           "--permission-mode", "acceptEdits", "--add-dir", WIRE_DIR,
            "--max-budget-usd", f"{cap:.2f}"]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     parsed = None
@@ -651,8 +651,8 @@ def main():
         ap.error("provide exactly one of <plan.json> or --goal")
     premium_model = args.premium_model or DEFAULT_MODEL
     if args.goal:
-        plan_path = os.path.join(BUS_DIR, "plan.json")
-        os.makedirs(BUS_DIR, exist_ok=True)
+        plan_path = os.path.join(WIRE_DIR, "plan.json")
+        os.makedirs(WIRE_DIR, exist_ok=True)
         plan = author_plan(args.goal, plan_path, premium_model, args.budget)
     else:
         plan = validate_plan(json.load(open(args.plan, encoding="utf-8")))
@@ -664,7 +664,7 @@ def main():
     spend = {"usd": 0.0}
     tasks = plan["tasks"]
 
-    subprocess.run([BUS, "init"], cwd=REPO_ROOT, check=False, capture_output=True)
+    subprocess.run([WIRE, "init"], cwd=REPO_ROOT, check=False, capture_output=True)
     log(f"{len(tasks)} tasks, budget ${budget:.2f}, "
         f"{'DRY-RUN' if args.dry_run else 'LIVE'}, concurrency {args.concurrency}")
 
@@ -714,7 +714,7 @@ def main():
         ids = ",".join(r["id"] for r in accepted)
         scribe_cap = max(budget - spend["usd"], 0.50)
         run_agent("scribe", f"Synthesize the accepted results ({ids}) into a final report "
-                  f"using docs/report-template.md. Read only accepted bus/<id>.result.md files.",
+                  f"using docs/report-template.md. Read only accepted wire/<id>.result.md files.",
                   "final", "report.md", premium_model, REPO_ROOT,
                   max_usd=scribe_cap)
 
