@@ -169,7 +169,14 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         f"instead; the driver, not the persona doc, decides the artifact name per task so "
         f"downstream tasks can find it by task id). Do NOT edit wire/manifest.md or run "
         f"bin/wire — the driver records all state. Coordinate only through files under "
-        f"`{WIRE_DIR}`."
+        f"`{WIRE_DIR}`.\n\n"
+        f"Before doing anything else, print one line to your own final response (not into the "
+        f"artifact file) in exactly this format, filling in the values you were actually given "
+        f"above:\n"
+        f"RESTATE task={task_id} artifact={artifact} cwd={cwd}\n"
+        f"This is a cheap, up-front comprehension check the driver reads back — it costs you "
+        f"nothing but catches a misread task id, wrong artifact path, or wrong working "
+        f"directory before you spend any real work on the wrong target."
     )
     if cwd != REPO_ROOT:
         # cwd here is either the shared target_repo or a worktree isolated from it — either way
@@ -201,6 +208,21 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None, m
         cost = float(parsed.get("total_cost_usd", 0.0))
     except Exception:
         _log_failure(task_id, proc)
+    if parsed is not None:
+        # Cheap comprehension check: this is the SAME call, just reading back what the agent
+        # already said, so it costs nothing extra but surfaces a misread task id/artifact/cwd
+        # (e.g. the composer-wrote-wrong-path bug) the moment it happens instead of after the
+        # fact via a missing-artifact diagnostic below.
+        m = RESTATE_RE.search(str(parsed.get("result", "")))
+        if m is None:
+            log(f"{task_id}: no RESTATE line in response — can't confirm the agent read its "
+                f"task/artifact/cwd correctly")
+        else:
+            r_task, r_artifact, r_cwd = m.groups()
+            if r_task != task_id or r_artifact != artifact or r_cwd != cwd:
+                log(f"{task_id}: RESTATE mismatch — agent echoed task={r_task} "
+                    f"artifact={r_artifact} cwd={r_cwd}, expected task={task_id} "
+                    f"artifact={artifact} cwd={cwd}")
     ok = os.path.exists(artifact)
     if not ok and persona == "composer":
         # composer's own persona doc (docs/patterns.md, .claude/agents/composer.md) says to
@@ -270,6 +292,9 @@ PLACEHOLDER_RE = re.compile(r"\b(TODO|TBD|FIXME|PLACEHOLDER|XXX)\b", re.I)
 CMD_VERBS_RE = re.compile(
     r"`\s*(?:grep|git|curl|npm|yarn|npx|jest|pytest|sed|awk|find|python3?|node|ls|cat|go)\b[^`\n]*`"
 )
+
+
+RESTATE_RE = re.compile(r"(?m)^RESTATE\s+task=(\S+)\s+artifact=(\S+)\s+cwd=(\S+)")
 
 
 def _evidence(text):
