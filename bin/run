@@ -129,21 +129,46 @@ VERIFY_PLANS = {
 }
 
 
+PLACEHOLDER_RE = re.compile(r"\b(TODO|TBD|FIXME|PLACEHOLDER|XXX)\b", re.I)
+
+
+def _evidence(text):
+    """Proof-of-work signals in a verdict artifact (evidence-gate). Returns
+    (has_placeholder, has_command). A logged command = a fenced block or a `$ `/`> ` line."""
+    text = text or ""
+    has_placeholder = bool(PLACEHOLDER_RE.search(text)) or not text.strip()
+    has_command = bool(re.search(r"```", text)) or bool(re.search(r"(?m)^[ \t]*[$>][ \t]+\S", text))
+    return has_placeholder, has_command
+
+
 def classify(text, kind):
-    """Parse a verdict/refute file. kind='confirm' -> HOLDS/FAILS/INCONCLUSIVE (+tier);
-    kind='refute' -> SURVIVES/REFUTED."""
+    """Parse a verdict/refute file AND apply the evidence gate. kind='confirm' ->
+    HOLDS/FAILS/INCONCLUSIVE (+tier); kind='refute' -> SURVIVES/REFUTED.
+
+    Evidence is required to PASS, never to fail: a HOLDS/SURVIVES that logs no command (or
+    that claims `executed` with no command, or contains a placeholder) is downgraded to
+    INCONCLUSIVE — which never accepts. This attacks the weak/static-drift verifier that
+    writes 'HOLDS(executed)' without having run anything. FAILS/REFUTED are never downgraded
+    (rejecting to the owner is the safe direction)."""
     t = (text or "").upper()
+    placeholder, has_cmd = _evidence(text)
     if kind == "confirm":
         tier = "executed" if "EXECUTED" in t else ("static" if "STATIC" in t else "untagged")
         if re.search(r"\bFAILS\b", t):
             return ("FAILS", tier)
         if re.search(r"\bHOLDS\b", t):
+            # gate: a claimed pass must be earned. static may skip the command (it's explicitly
+            # no-execution) but not the placeholder/empty check; executed/untagged need a command.
+            if placeholder or (tier != "static" and not has_cmd):
+                return ("INCONCLUSIVE", tier)
             return ("HOLDS", tier)
         return ("INCONCLUSIVE", tier)
     else:
         if re.search(r"\bREFUTED\b", t):
             return ("REFUTED", None)
         if re.search(r"\bSURVIVES\b", t):
+            if placeholder or not has_cmd:   # a clearance with no attack logged isn't a clearance
+                return ("INCONCLUSIVE", None)
             return ("SURVIVES", None)
         return ("INCONCLUSIVE", None)
 
@@ -218,9 +243,14 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                        f"{'Try to CONFIRM by independent execution' if kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
                        f"Tag your verdict executed/static.")
             if dry_run:
-                dv = task.get("dry_verdict", "HOLDS")
-                body = f"{dv}(executed)\n" if kind == "confirm" else \
-                       ("SURVIVES\n" if dv == "HOLDS" else "REFUTED\n")
+                dv = task.get("dry_verdict", "HOLDS")   # stub includes command evidence so it clears the gate
+                if kind == "confirm":
+                    obs = "observed: matches" if dv == "HOLDS" else "observed: mismatch"
+                    body = f"{dv}(executed)\n```\n$ ran the check\n{obs}\n```\n"
+                else:
+                    body = ("SURVIVES\n```\n$ attempted the attack\nno break\n```\n"
+                            if dv == "HOLDS" else
+                            "REFUTED\n```\n$ attempted the attack\nbroke it\n```\n")
                 dry = {"body": body, "cost": 0.03}
             else:
                 dry = None
@@ -231,7 +261,10 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             vpath = os.path.join(BUS_DIR, f"{label}.{suffix}")
             if os.path.exists(vpath):
                 text = open(vpath, encoding="utf-8").read()
-            verdicts.append((kind, *classify(text, kind)))
+            cv = classify(text, kind)
+            if cv[0] == "INCONCLUSIVE" and re.search(r"\b(HOLDS|SURVIVES)\b", (text or "").upper()):
+                log(f"{label}: evidence gate vetoed a claimed pass (no logged command / placeholder) → INCONCLUSIVE")
+            verdicts.append((kind, *cv))
 
         accepted, reason = decide([(k, v, t) for k, v, t in verdicts])
         bus_state(tid, task["persona"], "accepted" if accepted else "rejected")

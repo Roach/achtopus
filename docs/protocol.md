@@ -100,6 +100,31 @@ low-stakes claim, but for an S1/S2-class claim it should demand `HOLDS(executed)
 carries the tier into the report's verification tag (`VERIFIED` requires `executed`; static-only
 confirmation is `PARTIAL`). Never let a run report a wall of `HOLDS` that were all static.
 
+### Evidence gate — a pass must be earned (G7)
+
+Parsing the verdict *word* is not enough: a weak or drifting verifier can write `HOLDS(executed)`
+without having run anything. So the gate also inspects the verdict artifact for proof-of-work,
+and **evidence is required to PASS, never to fail**:
+
+- A `HOLDS`/`SURVIVES` that logs **no command** (no fenced block, no `$`/`>` command line) or
+  contains a **placeholder** (`TODO`/`TBD`/`FIXME`/empty) is downgraded to `INCONCLUSIVE` — which
+  never accepts. A `HOLDS(executed)` that shows no command is exactly this case.
+- `HOLDS(static)` is exempt from the *command* requirement (it is explicitly no-execution) but
+  not from the placeholder/empty check — it must still carry a real source trace.
+- `FAILS`/`REFUTED` are **never** downgraded: rejecting to the owner is the safe direction, so a
+  failing verdict needs no evidence to take effect.
+
+`bin/run`'s `classify()` enforces this in code, so a rubber-stamped pass can't slip through the
+gate even if a tired conductor would have waved it along.
+
+### Bounded verify loop — a retry budget and an escape hatch
+
+A reject sends work back to its owner to fix, then re-verify. That loop must be **bounded**: cap
+the fix→re-verify cycles per task (default 3, as the conductor's escalation rule), and on exhaustion
+mark the task `blocked` for a human rather than looping. An unbounded "verify until clear" loop with
+no retry budget is a known way to burn a large bill on a claim that never converges — the budget
+governor is the backstop, but the loop should stop itself first.
+
 ### Quorum for multi-voter verify (G5)
 
 The 2-agent pair above is the default. When a claim is important enough to warrant more
