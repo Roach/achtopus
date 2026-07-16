@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Acht Opus — install the eight personas as native Claude Code subagent types.
+# Achtopus — install the eight personas as native Claude Code subagent types.
 #
 # Without this, you have to hand-inject each persona's markdown into a general-purpose
 # agent prompt. Symlinking the defs into a `.claude/agents/` directory makes `soloist`,
@@ -31,7 +31,7 @@ agents=(conductor composer luthier soloist critic tuner heckler scribe)
 
 if [ "$mode" = "uninstall" ]; then
   for a in "${agents[@]}"; do rm -f "$DEST/$a.md"; done
-  echo "uninstalled 8 Acht Opus personas from $DEST"
+  echo "uninstalled 8 Achtopus personas from $DEST"
   exit 0
 fi
 
@@ -46,5 +46,5 @@ for a in "${agents[@]}"; do
   if [ "$mode" = "copy" ]; then cp "$s" "$d"; else ln -sf "$s" "$d"; fi
 done
 
-echo "installed 8 Acht Opus personas ($mode) into $DEST"
+echo "installed 8 Achtopus personas ($mode) into $DEST"
 echo "invoke them as subagent types: conductor composer luthier soloist critic tuner heckler scribe"

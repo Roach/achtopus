@@ -1,4 +1,4 @@
-# Acht Opus — session instructions
+# Achtopus — session instructions
 
 This repo is a Claude Code multi-agent coordination framework. When working *inside* it:
 

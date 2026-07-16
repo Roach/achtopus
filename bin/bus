@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Acht Opus — file message bus helper.
-# A greppable, human-readable coordination channel for the eight-agent orchestra.
+# Achtopus — file message bus helper.
+# A greppable, human-readable coordination channel for the octopus's eight arms.
 # No daemon, no database: the filesystem IS the bus. Every agent reads/writes the
 # same files under $BUS, so the state of the world is always `cat`-able and `grep`-able.
 #
@@ -55,7 +55,7 @@ unlock() { rmdir "$LOCK" 2>/dev/null || true; }
 ensure_board() {
   if [ ! -f "$BOARD" ]; then
     {
-      echo "# Acht Opus — Bus Board"
+      echo "# Achtopus — Bus Board"
       echo ""
       echo "One fact per line. Format: [<utc>] <id> <role> <state> — <note>"
       echo ""

@@ -1,4 +1,4 @@
-# Acht Opus — Do we need a harness?
+# Achtopus — Do we need a harness?
 
 Short answer: **yes — but only for the half of the framework that prose can't enforce.**
 The field evals split the recurring failures cleanly into two buckets, and only one of
@@ -23,7 +23,7 @@ accumulated narration on every single agent event.
 
 ### The structural root
 
-**Acht Opus, as pure markdown personas, puts an LLM conductor in the hot loop.** Every
+**Achtopus, as pure markdown personas, puts an LLM conductor in the hot loop.** Every
 agent completion is an LLM turn. Every LLM turn re-bills the conductor's whole (and
 growing) context and emits fresh summarizing prose. Cost therefore scales with
 `agents × turns × context-size`, and the conductor's context is the term that grows

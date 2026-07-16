@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Acht Opus — deterministic driver (prototype).
+Achtopus — deterministic driver (prototype).
 
 Takes the conductor OUT of the LLM hot loop. Coordination — fan-out, budget,
 verify gating, board state, synthesis handoff — is plain Python here; an LLM is
@@ -77,7 +77,7 @@ def run_agent(persona, prompt, task_id, artifact_suffix, model, cwd, dry=None):
         return (dry.get("cost", 0.0), True)
 
     system = persona_body(persona) + (
-        f"\n\n## Driver contract (Acht Opus)\n"
+        f"\n\n## Driver contract (Achtopus)\n"
         f"You are running under the deterministic driver. Write your entire deliverable to the "
         f"absolute path `{artifact}`. Do NOT edit bus/board.md or run bin/bus — the driver records "
         f"all state. Coordinate only through files under `{BUS_DIR}`."
@@ -124,8 +124,12 @@ VERIFY_PLANS = {
     "none":    [],
     "single":  [("tuner", "confirm")],
     "pair":    [("tuner", "confirm"), ("heckler", "refute")],
-    "quorum3": [("tuner", "confirm")] * 3,
-    "quorum5": [("tuner", "confirm")] * 5,
+    # Odd N, MIXED voters — a quorum of identical tuner-confirm calls has zero heckler
+    # diversity (each voter attacks the same failure mode). Mix confirm/refute so the
+    # panel attacks distinct failure modes, per docs/protocol.md G5 and docs/patterns.md.
+    "quorum3": [("tuner", "confirm"), ("tuner", "confirm"), ("heckler", "refute")],
+    "quorum5": [("tuner", "confirm"), ("tuner", "confirm"), ("tuner", "confirm"),
+                ("heckler", "refute"), ("heckler", "refute")],
 }
 
 
@@ -175,26 +179,70 @@ def classify(text, kind):
 
 def decide(verdicts):
     """verdicts: list of (kind, verdict, tier). Returns (accepted, reason). Pure code —
-    this is the accept/reject a prose conductor used to fudge."""
+    this is the accept/reject a prose conductor used to fudge.
+
+    A "pass" is HOLDS from a confirmer (tuner) or SURVIVES from a refuter (heckler) — the
+    same underlying question either scale asks: did this voter clear the claim. For N<=2
+    (single/pair) every voter must pass (unanimity). For N>=3 (quorum) voters are a MIXED
+    panel of tuner+heckler attacking distinct failure modes (see VERIFY_PLANS), and this is
+    the same rule extended past N=2: unanimity at N=2 already equals strict majority
+    (>1 of 2 requires both), quorum just lets N>=3 pass on a non-unanimous majority."""
     if not verdicts:
         return (True, "no-verify (low-stakes: auto-accepted)")
-    confirms = [v for v in verdicts if v[0] == "confirm"]
-    refutes = [v for v in verdicts if v[0] == "refute"]
     if any(v == "INCONCLUSIVE" for _, v, _ in verdicts):
         return (False, "INCONCLUSIVE verdict — not cleared (blocked, per protocol G4)")
+
+    n = len(verdicts)
+    if n >= 3:  # quorum: strict majority of passes across the mixed confirm/refute panel
+        passing = sum(1 for _, v, _ in verdicts if v in ("HOLDS", "SURVIVES"))
+        if passing > n / 2:
+            return (True, f"quorum {passing}/{n} passing (mixed confirm/refute)")
+        return (False, f"quorum failed ({passing}/{n} passing)")
+
+    # single or pair: every confirmer must HOLD (and any heckler must SURVIVE)
+    confirms = [v for v in verdicts if v[0] == "confirm"]
+    refutes = [v for v in verdicts if v[0] == "refute"]
     if any(v == "REFUTED" for _, v, _ in refutes):
         return (False, "heckler REFUTED the claim")
-    if len(confirms) >= 3:  # quorum: strict majority must HOLD
-        holds = sum(1 for _, v, _ in confirms if v == "HOLDS")
-        if holds > len(confirms) / 2:
-            return (True, f"quorum {holds}/{len(confirms)} HOLDS")
-        return (False, f"quorum failed ({holds}/{len(confirms)} HOLDS)")
-    # single or pair: every confirmer must HOLD (and any heckler must SURVIVE)
     if all(v == "HOLDS" for _, v, _ in confirms) and all(v == "SURVIVES" for _, v, _ in refutes):
         tiers = {tier for k, v, tier in confirms}
         note = "HOLDS(static only)" if tiers == {"static"} else "HOLDS"
         return (True, f"{note}" + (" + SURVIVES" if refutes else ""))
     return (False, "a confirmer did not return HOLDS")
+
+
+# ---- coverage gate: critic checks rubric coverage BEFORE the tuner/heckler verify pass ---
+
+def run_coverage_gate(task, model, dry_run):
+    """Spawn the critic to check whether the task's result answered every rubric question
+    for its domain (docs/prr.md's A-K list) — a coverage gap is its own finding, separate
+    from whether individual claims are correct (that stays the tuner/heckler's job). Returns
+    (cost, gap_flag, note) where note is a short string surfaced on the task's outcome. This
+    does not gate accept/reject on its own; it is a real, invoked step whose output is used,
+    not dead weight sitting unwired."""
+    tid = task["id"]
+    domain_hint = task.get("domain", task["prompt"][:120])
+    cprompt = (f"Coverage gate for bus/{tid}.result.md. Domain/claim context: {domain_hint!r}. "
+               f"Using the matching domain's rubric questions in docs/prr.md's A-K list, check "
+               f"whether the result answered every question for that domain, or whether some "
+               f"were silently unaddressed. Do not judge whether the answers given are correct — "
+               f"that is a separate verify step. First line of your report must be exactly "
+               f"'COVERAGE: complete' or 'COVERAGE: gaps'.")
+    dry = ({"body": "COVERAGE: complete — all rubric questions addressed.\n", "cost": 0.02}
+           if dry_run else None)
+    cost, ok = run_agent("critic", cprompt, tid, "coverage.md", model, REPO_ROOT, dry)
+    text = ""
+    cpath = os.path.join(BUS_DIR, f"{tid}.coverage.md")
+    if os.path.exists(cpath):
+        text = open(cpath, encoding="utf-8").read()
+    gap = bool(re.search(r"^COVERAGE:\s*gaps", text, re.I | re.M))
+    note = ""
+    if gap:
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        note = "coverage gap: " + (lines[1] if len(lines) > 1 else "unspecified rubric question(s) unaddressed")
+    elif not ok or not text.strip():
+        note = "coverage gate did not run / posted nothing"
+    return cost, gap, note
 
 
 # ---- the coordination loop (deterministic; this is what replaces the LLM) -------
@@ -227,6 +275,20 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             bus_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "no-result", "cost": cost}
         bus_state(tid, task["persona"], "done")
+
+        # Coverage gate — critic checks rubric coverage BEFORE tuner/heckler verify.
+        # A gap is a note on the outcome, not a block: tuner/heckler still own accept/reject.
+        coverage_note = ""
+        with lock:
+            room = spend["usd"] + est <= budget
+        if room:
+            ccost, gap, coverage_note = run_coverage_gate(task, model, dry_run)
+            with lock:
+                spend["usd"] += ccost
+            if gap:
+                log(f"{tid}: critic coverage gate flagged a gap — {coverage_note}")
+        else:
+            log(f"{tid}: critic coverage gate SKIPPED — budget governor")
 
         # Verify stage — spawn the configured verifiers, then GATE IN CODE.
         verify = task.get("verify", "pair")
@@ -268,8 +330,10 @@ def process_task(task, plan, spend, budget, dry_run, lock):
 
         accepted, reason = decide([(k, v, t) for k, v, t in verdicts])
         bus_state(tid, task["persona"], "accepted" if accepted else "rejected")
+        if coverage_note:
+            reason = f"{reason}; {coverage_note}"
         return {"id": tid, "outcome": "accepted" if accepted else "rejected",
-                "reason": reason, "cost": cost}
+                "reason": reason, "cost": cost, "coverage_gap": bool(coverage_note)}
     finally:
         if wt:
             remove_worktree(plan["target_repo"], wt)
@@ -398,7 +462,7 @@ def main():
     n_acc = sum(1 for r in results if r["outcome"] == "accepted")
     n_rej = sum(1 for r in results if r["outcome"] == "rejected")
     n_skip = sum(1 for r in results if r["outcome"] not in ("accepted", "rejected"))
-    print(f"\n\033[1mAcht Opus run complete\033[0m")
+    print(f"\n\033[1mAchtopus run complete\033[0m")
     print(f"  accepted {n_acc}  rejected {n_rej}  skipped/blocked {n_skip}")
     print(f"  spend ${spend['usd']:.2f} / budget ${budget:.2f}"
           + ("  \033[31m(governor engaged)\033[0m" if n_skip and spend['usd'] + plan.get('est_agent_usd',0.15) > budget else ""))

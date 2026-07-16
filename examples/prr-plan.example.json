@@ -1,0 +1,52 @@
+{
+  "budget_usd": 6.00,
+  "est_agent_usd": 0.15,
+  "default_model": "claude-haiku-4-5-20251001",
+  "tasks": [
+    {
+      "id": "d1",
+      "persona": "soloist",
+      "prompt": "PRR domain — Observability: is there a RED/USE dashboard, do new code paths emit logs/metrics/traces with correct low-cardinality tags, and can an error be attributed to a request/tenant/version? Rate green/warning/red with evidence.",
+      "verify": "single",
+      "dry_verdict": "HOLDS"
+    },
+    {
+      "id": "d2",
+      "persona": "soloist",
+      "prompt": "PRR domain — Data integrity & migrations: are schema/data migrations backward-compatible and zero-downtime (expand/contract), is the backfill idempotent with a rollback, and are backups/restore verified? Rate green/warning/red with evidence.",
+      "verify": "pair",
+      "model": "claude-opus-4-8",
+      "dry_verdict": "HOLDS"
+    },
+    {
+      "id": "d3",
+      "persona": "soloist",
+      "prompt": "PRR domain — Rollout, deploy safety & rollback: is there a tested fast rollback, a feature flag/kill switch, a staged canary with gating metrics, and is infra defined as code? Rate green/warning/red with evidence.",
+      "verify": "pair",
+      "model": "claude-opus-4-8",
+      "dry_verdict": "FAILS"
+    },
+    {
+      "id": "d4",
+      "persona": "soloist",
+      "prompt": "PRR domain — Dependencies & failure modes: for each upstream, what happens when it is slow/down (timeouts, retries, circuit breakers, degradation)? Are downstream consumers notified? New single point of failure? Rate green/warning/red with evidence.",
+      "verify": "single",
+      "dry_verdict": "HOLDS"
+    },
+    {
+      "id": "d5",
+      "persona": "soloist",
+      "prompt": "PRR domain — Security & privacy: authn/authz changes, untrusted input handling (XSS/SQLi/prompt-injection), network exposure, data-at-rest/in-transit encryption & tenant isolation, audit logging, and any sensitive-data handling. Rate green/warning/red with evidence; flag anything needing a human threat-model review.",
+      "verify": "quorum3",
+      "model": "claude-opus-4-8",
+      "dry_verdict": "HOLDS"
+    },
+    {
+      "id": "d6",
+      "persona": "soloist",
+      "prompt": "PRR domain — Alerting & on-call: do alerts exist on key SLIs, defined as code and proven to fire, tied to the SLO, with a named 24/7 rotation and escalation path? Rate green/warning/red; note what needs human confirmation.",
+      "verify": "single",
+      "dry_verdict": "HOLDS"
+    }
+  ]
+}

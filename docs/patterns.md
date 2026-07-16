@@ -1,11 +1,11 @@
-# Acht Opus — Coordination Patterns
+# Achtopus — Coordination Patterns
 
-Four patterns, one orchestra of eight. Each pattern is a way of wiring the same personas
+Four patterns, one octopus of eight arms. Each pattern is a way of wiring the same arms
 through the same bus.
 
 ## 1. Orchestrator / worker (fan-out)
 
-**Personas:** 🎩 conductor → 🎻 soloist ×N → ✒️ scribe
+**Personas:** 🐙 conductor → 🔦 soloist ×N → 🖋️ scribe
 
 ```
 conductor: decompose → bus/plan.md (t1..tN, marked independent)
@@ -20,7 +20,7 @@ ledger so nothing is lost or duplicated.
 
 ## 2. Peer message bus (no boss)
 
-**Personas:** 🎻 soloist ×N as peers, ✒️ scribe keeps `board.md`
+**Personas:** 🔦 soloist ×N as peers, 🖋️ scribe keeps `board.md`
 
 ```
 each soloist: claim a task on bus/board.md (claim guard prevents collisions)
@@ -33,21 +33,24 @@ be a bottleneck. The board is the whole coordination surface.
 
 ## 3. Pipeline stages
 
-**Personas:** 🎼 composer → 🔨 luthier → 📰 critic (→ 🎚️ tuner)
+**Personas:** 🧭 composer → 🔦/🔧 soloist/luthier → 🧐 critic (→ ✊ tuner)
 
 ```
-composer: goal → bus/plan.md (ordered steps + acceptance checks)
-luthier:  build one step → run acceptance check → bus/<step>.result.md
-critic:   review the diff → bus/<step>.review.md
-tuner:    (if findings) verify each → bus/<step>.verdict.md
+composer: PRD/diff → ONE bus/context.md (shared grounding, read by every other arm)
+soloist/luthier: do the domain's work (review end-to-end, or exercise it hands-on) → bus/<id>.result.md
+critic:   coverage-gate the result against its domain's rubric → bus/<id>.coverage.md
+tuner/heckler: verify the underlying claims → bus/<id>.verdict.md / .refute.md
 ```
 
-Stages flow per-item: step 2 can be building while step 1 is in review. Use for
-plan → build → review → verify work with clear handoffs.
+The composer runs once, first, before any domain reviewer starts — it is not a per-item
+stage, it is the shared brief that lets every downstream stage skip re-deriving the same
+PRD read and `git diff`. The critic's coverage check is a gate on *completeness*
+(did the domain answer every rubric question), separate from the tuner/heckler's gate on
+*correctness* (is each answer actually true) — both must clear before synthesis.
 
 ## 4. Adversarial verify
 
-**Personas:** 🎚️ tuner (confirm) + 🍅 heckler (refute), judged by 🎩 conductor
+**Personas:** ✊ tuner (confirm) + 🫳 heckler (refute), judged by 🐙 conductor
 
 ```
 for each load-bearing claim:
@@ -130,5 +133,5 @@ Levers, roughly in order of impact:
   more than the tokens you shaved. Stabilize the shared prefix, spawn each wave promptly.
 
 Rule of thumb: if a lighter ad-hoc pass (say, a single reviewer or a 3-agent check) would
-catch the same class of issue, use it. Bring the full orchestra out when being
+catch the same class of issue, use it. Bring all eight arms out when being
 *confidently wrong* is expensive.

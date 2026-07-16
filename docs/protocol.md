@@ -1,4 +1,4 @@
-# Acht Opus — Bus Protocol
+# Achtopus — Bus Protocol
 
 The bus is the one thing the rest of the ecosystem lacks: a **greppable, agent↔agent
 coordination channel** on the filesystem. No daemon, no DB. If you can `cat` it, you
@@ -9,12 +9,13 @@ know the state of the world.
 | File | Written by | Purpose |
 |---|---|---|
 | `board.md` | scribe (and `bin/bus`) | The ledger — one fact per line, every task's owner + state |
-| `plan.md` | composer / conductor | The shared plan: ordered steps with ids + acceptance checks |
+| `plan.md` | conductor | The shared plan: ordered steps with ids + acceptance checks |
+| `context.md` | composer | The one shared grounding brief (PRD read + diff inventory) every other arm reads instead of re-deriving |
 | `<id>.result.md` | soloist / luthier | The deliverable/output for task `<id>` |
-| `<id>.review.md` | critic | Ranked findings on a build |
+| `<id>.coverage.md` | critic | Rubric-coverage gate on a domain result: `COVERAGE: complete` / `COVERAGE: gaps` (+ which rubric letters) |
 | `<id>.verdict.md` | tuner | Verify verdict: `HOLDS` / `FAILS` / `INCONCLUSIVE` |
 | `<id>.refute.md` | heckler | Refutation attempt: `REFUTED` / `SURVIVES` |
-| `_archive/<stamp>/` | `bin/bus clear` | Prior performances, kept for the record |
+| `_archive/<stamp>/` | `bin/bus clear` | Prior reviews, kept for the record |
 
 ## Task lifecycle
 
@@ -128,13 +129,22 @@ governor is the backstop, but the loop should stop itself first.
 ### Quorum for multi-voter verify (G5)
 
 The 2-agent pair above is the default. When a claim is important enough to warrant more
-voters, fix an **odd** number `N` (3 or 5) of verifiers up front, each attacking a
-*distinct* failure mode, and decide by majority:
+voters, fix an **odd** number `N` (3 or 5) of verifiers up front and decide by majority.
+Diversity is the point, so a quorum is not N identical confirmers — `bin/run`'s
+`quorum3`/`quorum5` mix `tuner` (confirm) and `heckler` (refute) voters (2 tuner + 1
+heckler for `quorum3`; 3 tuner + 2 heckler for `quorum5`) so the panel attacks distinct
+failure modes instead of N restatements of the same check:
 
-- Accept iff a strict majority (`> N/2`) return a passing verdict (`HOLDS`/`SURVIVES`).
+- Each voter still reports on its own scale (a confirming voter returns `HOLDS`/`FAILS`;
+  a refuting voter returns `SURVIVES`/`REFUTED`) — a voter never mixes both scales itself.
+- To decide, count a **pass** as `HOLDS` (from a confirmer) or `SURVIVES` (from a
+  refuter) — the same "did this voter clear the claim" question either scale is really
+  asking — and accept iff a strict majority (`> N/2`) of the N voters passed.
 - Otherwise reject. There are no ties with odd `N`.
-- Use one verdict vocabulary per voter (a voter is either confirming → `HOLDS`/`FAILS`, or
-  refuting → `SURVIVES`/`REFUTED`); don't mix both scales inside a single "majority" count.
+- This is the same rule the 2-voter pair already uses, just extended past N=2: the pair's
+  "every confirmer HOLDS and every heckler SURVIVES" is unanimity, and unanimity at N=2
+  *is* strict majority (`>1` of 2 means both) — quorum just lets the majority be non-unanimous
+  once N≥3.
 
 Note the 2-way rule is unanimity ("any `REFUTED` rejects"), which is *stricter* than
 majority — that's intended: with only two voters, one credible refutation should block.
