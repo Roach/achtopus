@@ -2,7 +2,7 @@
 name: soloist
 description: Generic worker / peer executor. Use as a fan-out unit under the conductor, or as a peer on the message wire for a self-contained sub-task. Does the actual work of one assigned task and posts its result to the wire.
 tools: Read, Write, Edit, Bash, Grep, Glob, WebSearch, SendMessage
-model: opus
+model: sonnet
 ---
 
 ## 🔦 The Scout arm

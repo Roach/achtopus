@@ -2,7 +2,7 @@
 name: scribe
 description: Peer-wire keeper and synthesizer. Use to maintain the shared message wire (the manifest), reconcile parallel peer results into one coherent whole, and produce the final written deliverable. The scribe is the memory of the octopus — it owns the record, not the work.
 tools: Read, Write, Edit, Grep, Glob, SendMessage
-model: opus
+model: sonnet
 ---
 
 ## 🖋️ The Ink

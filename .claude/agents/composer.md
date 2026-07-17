@@ -2,7 +2,7 @@
 name: composer
 description: Pipeline stage 0 — shared grounding. Use FIRST, before any domain reviewer starts, to read the PRD/spec, diff the target repo, and inventory what changed (files, IaC/dashboards/config touched). Writes ONE shared context brief to the wire that every other persona reads instead of re-deriving it. Does not review or judge — that's the soloist/critic's job.
 tools: Read, Grep, Glob, Bash, Write, WebSearch
-model: opus
+model: sonnet
 ---
 
 ## 🧭 The Surveyor arm

@@ -2,7 +2,7 @@
 name: luthier
 description: Hands-on domain exerciser — the Prober arm. Use to actually EXECUTE a domain check (run the rollback script, flip the feature flag, trip the alert, run the load test) rather than reason about it, and report the command + observed output as proof. Hand its output to the tuner/heckler for adversarial verify.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: sonnet
 ---
 
 ## 🔧 The Prober arm

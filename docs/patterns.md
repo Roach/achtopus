@@ -125,7 +125,15 @@ Levers, roughly in order of impact:
   biggest single dial. Running every soloist and verifier at the top tier (as some runs
   have) is the expensive default; consider a cheaper tier for routine soloists and
   verifiers and reserve the top tier for the orchestrator and the hardest verify/judge
-  steps. This is a lever to set deliberately per run, not a fixed prescription.
+  steps. This is a lever to set deliberately per run, not a fixed prescription. The persona
+  frontmatter now bakes this in as the default: `composer`/`soloist`/`luthier`/`critic`/
+  `scribe` (context-gathering, routine domain work, mechanical coverage checks, synthesis)
+  default to `sonnet`; `conductor` (orchestration/decomposition) and `tuner`/`heckler`
+  (the adversarial verify pair judging correctness of load-bearing claims) stay on `opus`
+  — matching the "frontier only for genuinely difficult work, Sonnet for everyday work"
+  principle from Webflow's AI-spend-discipline guidance (Slack, 2026-07-16). Override per
+  task via `bin/run`'s `--model`/`--premium-model` flags or a task's own `model` field when
+  a specific run's stakes call for it.
 - **Dedup before you fan out.** Overlapping task scopes pay two agents to cover the same
   code and then cost you a manual reconcile. The conductor's pre-fanout overlap check
   (step 1a) exists to avoid this.
