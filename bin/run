@@ -18,7 +18,8 @@ everything after (fan-out, budget, gating, synthesis) is deterministic code.
 Plan schema (see docs/harness.md and the example under examples/):
     {
       "budget_usd": 5.00,               # hard ceiling; the governor refuses to spawn past it
-      "est_agent_usd": 0.15,            # per-agent projection used by the governor
+      "est_agent_usd": 0.15,            # STARTING per-agent projection, used only until enough
+                                         #   real calls have landed — see reserved_estimate()
       "default_model": "claude-sonnet-5",
       "target_repo": "/path/to/repo",   # optional; enables worktree isolation
       "tasks": [
@@ -49,6 +50,10 @@ WIRE_DIR = os.path.join(REPO_ROOT, "wire")
 AGENTS_DIR = os.path.join(REPO_ROOT, ".claude", "agents")
 WIRE = os.path.join(REPO_ROOT, "bin", "wire")
 RUN_STATE_FILE = os.path.join(WIRE_DIR, ".run_state.json")
+# A real code-review diff is at most a few thousand lines. A candidate base ref that produces
+# more than this is almost certainly a stale local remote-tracking branch (unfetched for weeks/
+# months), not the actual PR base — cache that and every downstream persona reviews noise.
+MAX_PRECOMPUTE_DIFF_BYTES = 5_000_000
 
 
 def load_run_state():
@@ -157,20 +162,40 @@ def context_brief_note():
     by the composer — so every task reuses them instead of re-deriving/re-fetching the same
     PRD read, diff, or PR metadata every other arm would otherwise repeat identically. Each
     entry is independent (a run without network access may have diff.patch but no pr.json) —
-    mention only the ones that actually exist. Empty string (no-op) when nothing is cached yet."""
+    mention only the ones that actually exist. Empty string (no-op) when nothing is cached yet.
+
+    Called from build_system_prompt() so it lands on EVERY stage's system prompt (result,
+    coverage-gate, verify) — it used to be appended only to the verify/coverage-gate user
+    prompts, which left the main result-stage call with zero mention of the cache. A live
+    canary caught the consequence directly: the composer's result-stage call had no cache
+    pointer at all, ran its own `git diff` against a merge-base that turned out stale, and
+    produced a 73,670-file diff instead of the real ~23-file one — while the SAME run's
+    error-handling task, whose verify prompt DID carry this note, read the cache correctly
+    and got the clean diff for $0. Worded as a hard MUST, not a suggestion: prose guidance a
+    persona doc merely recommends is easy to skip under task pressure."""
     parts = []
     if os.path.exists(os.path.join(WIRE_DIR, "context.md")):
         parts.append("`wire/context.md` (shared PRD/diff/changed-files context brief)")
     if cache.has(WIRE_DIR, "diff.patch"):
-        parts.append("`wire/cache/diff.patch` (the full raw diff, already fetched — "
-                      "`bin/cache get diff.patch` or read the file directly; don't re-run `git diff` yourself)")
+        parts.append("`wire/cache/diff.patch` (the full raw diff, already fetched)")
     if cache.has(WIRE_DIR, "changed-files.txt"):
         parts.append("`wire/cache/changed-files.txt` (changed-file list with status, already computed)")
     if cache.has(WIRE_DIR, "pr.json"):
-        parts.append("`wire/cache/pr.json` (cached PR metadata — don't re-run `gh pr view`/`gh api` yourself)")
+        parts.append("`wire/cache/pr.json` (cached PR metadata, already fetched)")
     if not parts:
         return ""
-    return " Read " + ", then ".join(parts) + " first; don't re-derive or re-fetch that context yourself."
+    return (
+        "\n\n## Cache — read this before touching git/gh\n"
+        "This run already has cached context: " + ", ".join(parts) + ". "
+        "You MUST read these first (`bin/cache get <key>` or read the `wire/cache/` file "
+        "directly) and MUST NOT run your own `git diff`/`git log`/`gh pr view`/`gh api` to "
+        "re-derive the same content — not \"prefer the cache\", an outright rule. A prior run "
+        "ignored this and re-ran `git diff` against a stale local ref, producing a "
+        "73,670-file diff instead of the real ~23-file change; reading the cache instead "
+        "avoids that failure mode entirely, at zero cost, every time. If a cache entry is "
+        "missing or looks visibly wrong for this task (empty, truncated, wrong repo), say so "
+        "explicitly in your result rather than silently re-deriving it yourself."
+    )
 
 
 def precompute_context_cache(plan, dry_run):
@@ -209,16 +234,26 @@ def precompute_context_cache(plan, dry_run):
                 merge_base = mb.stdout.strip()
                 diff = subprocess.run(["git", "-C", target_repo, "diff", f"{merge_base}...HEAD"],
                                        capture_output=True, timeout=60)
-                if diff.returncode == 0 and diff.stdout.strip():
-                    cache.set_bytes(WIRE_DIR, "diff.patch", diff.stdout)
-                    log(f"precomputed wire/cache/diff.patch vs {base_ref} "
-                        f"({len(diff.stdout)} bytes, $0.00 — no LLM call)")
-                    names = subprocess.run(["git", "-C", target_repo, "diff", "--name-status",
-                                             f"{merge_base}...HEAD"], capture_output=True, timeout=30)
-                    if names.returncode == 0 and names.stdout.strip():
-                        cache.set_bytes(WIRE_DIR, "changed-files.txt", names.stdout)
-                        log("precomputed wire/cache/changed-files.txt ($0.00 — no LLM call)")
-                    break
+                if diff.returncode != 0 or not diff.stdout.strip():
+                    continue
+                if len(diff.stdout) > MAX_PRECOMPUTE_DIFF_BYTES:
+                    # A merge-base against a stale local remote-tracking ref (e.g. `origin/main`
+                    # not fetched in months) produces a diff that's the whole intervening history,
+                    # not the actual change under review — caching that as ground truth is worse
+                    # than not caching anything, since a persona reading it would review the wrong
+                    # thing. Try the next candidate instead of trusting this one.
+                    log(f"precompute diff vs {base_ref}: {len(diff.stdout)} bytes exceeds "
+                        f"{MAX_PRECOMPUTE_DIFF_BYTES} — looks like a stale/wrong base ref, skipping")
+                    continue
+                cache.set_bytes(WIRE_DIR, "diff.patch", diff.stdout)
+                log(f"precomputed wire/cache/diff.patch vs {base_ref} "
+                    f"({len(diff.stdout)} bytes, $0.00 — no LLM call)")
+                names = subprocess.run(["git", "-C", target_repo, "diff", "--name-status",
+                                         f"{merge_base}...HEAD"], capture_output=True, timeout=30)
+                if names.returncode == 0 and names.stdout.strip():
+                    cache.set_bytes(WIRE_DIR, "changed-files.txt", names.stdout)
+                    log("precomputed wire/cache/changed-files.txt ($0.00 — no LLM call)")
+                break
             except Exception as e:
                 log(f"precompute diff (base_ref={base_ref}): skipped ({e})")
 
@@ -310,8 +345,13 @@ def build_system_prompt(persona, artifact, cwd):
     """The driver-contract system prompt a persona runs under: its own doc plus the override
     text telling it where to actually write and (if isolated) that its cwd is already a local
     checkout. Extracted so the preflight roll-call phase can build the EXACT same prompt a
-    task will really run under, before spending anything on the real call."""
-    system = persona_body(persona) + (
+    task will really run under, before spending anything on the real call.
+
+    Includes context_brief_note() so the cache pointer lands on EVERY stage's system prompt,
+    not just verify/coverage-gate's user prompt — see that function's docstring for why the
+    result-stage call (which used to get none of this) is exactly where a live run's cache
+    bypass happened."""
+    system = persona_body(persona) + context_brief_note() + (
         f"\n\n## Driver contract (Achtopus)\n"
         f"You are running under the deterministic driver. Write your entire deliverable to the "
         f"absolute path `{artifact}` — and ONLY that path. This OVERRIDES any other output "
@@ -677,7 +717,7 @@ def run_coverage_gate(task, model, dry_run, max_usd=None):
                f"whether the result answered every question for that domain, or whether some "
                f"were silently unaddressed. Do not judge whether the answers given are correct — "
                f"that is a separate verify step. First line of your report must be exactly "
-               f"'COVERAGE: complete' or 'COVERAGE: gaps'." + context_brief_note())
+               f"'COVERAGE: complete' or 'COVERAGE: gaps'.")
     dry = ({"body": "COVERAGE: complete — all rubric questions addressed.\n", "cost": 0.02}
            if dry_run else None)
     cost, ok = run_agent("critic", cprompt, tid, "coverage.md", model, REPO_ROOT, dry, max_usd=max_usd)
@@ -723,10 +763,59 @@ def check_scope(task):
 
 # ---- the coordination loop (deterministic; this is what replaces the LLM) -------
 
+# Real per-call costs vary a lot by persona/stage (a critic coverage-gate call runs well under
+# $1; a domain soloist call can run $1-3), but a flat plan-supplied est_agent_usd has to be
+# pessimistic enough to cover the most expensive call type or it risks a real overshoot. The
+# fallout: a live canary measured est_agent_usd=3.00 against a real per-call average under $1 —
+# every task's own admission reserved 3-4x its actual eventual cost, so 6 concurrently-dispatched
+# domain tasks alone reserved ~$18 of a $20 budget just entering their first stage, starving
+# security/rollout-risk and two verify passes into INCONCLUSIVE rejections despite real total
+# spend landing at $17.01.
+#
+# First fix attempt was a single global running average, gated on 3 samples before trusting it.
+# A follow-up live run showed that's not enough — it made outcomes WORSE (4 rejected vs 2): the
+# 6 domain tasks' own "result" stage reservations all fire nearly simultaneously right after
+# `brief` finishes, so by the time they reserve, only brief's ONE result-stage sample exists —
+# nowhere near 3. And once enough samples DO land, a single blended average lets the expensive
+# result-stage costs (~$1.2-1.7) drag the reservation for cheap coverage-gate/verify calls
+# (~$0.3-0.7, coverage-gate measured at $0.527) up with them, starving those cheap calls even
+# though real budget existed for them specifically. Fix: track a separate running average PER
+# call kind (result / coverage / verify) so each stage type's reservation reflects only ITS OWN
+# real costs, and trust a kind's average after just 1 real sample of that kind — the 6 domain
+# tasks' result-stage reservations still start from the static guess (no result-kind sample
+# exists until one lands), but their coverage-gate/verify reservations benefit from every
+# same-kind call across ALL tasks, not just their own, so they mature fast even under high
+# concurrency.
+ADAPTIVE_MIN_SAMPLES = 1
+ADAPTIVE_SAFETY_MARGIN = 1.5
+ADAPTIVE_FLOOR_USD = 0.05
+
+
+def reserved_estimate(spend, plan, kind):
+    """The amount to reserve for the NEXT call of this `kind` ("result" | "coverage" | "verify"),
+    computed atomically with the admission check (must be called with `lock` already held — see
+    the concurrency-race note in process_task). Starts from the plan's flat est_agent_usd for a
+    kind until ADAPTIVE_MIN_SAMPLES real costs of THAT kind have landed this run, then switches
+    to max(kind_running_average * ADAPTIVE_SAFETY_MARGIN, ADAPTIVE_FLOOR_USD)."""
+    bucket = spend.setdefault("kinds", {})
+    n, total = bucket.get(kind, (0, 0.0))
+    if n < ADAPTIVE_MIN_SAMPLES:
+        return plan.get("est_agent_usd", 0.15)
+    avg = total / n
+    return max(avg * ADAPTIVE_SAFETY_MARGIN, ADAPTIVE_FLOOR_USD)
+
+
+def record_actual_cost(spend, cost, kind):
+    """Feed a real, reconciled call cost into the per-kind running average reserved_estimate()
+    reads. Must be called with `lock` already held, right alongside the spend["usd"] reconciliation."""
+    bucket = spend.setdefault("kinds", {})
+    n, total = bucket.get(kind, (0, 0.0))
+    bucket[kind] = (n + 1, total + cost)
+
+
 def process_task(task, plan, spend, budget, dry_run, lock):
     tid = task["id"]
     model = task.get("model", plan.get("default_model", DEFAULT_MODEL))
-    est = plan.get("est_agent_usd", 0.15)
 
     # Scope governor — refuse before spawning if the task's own declared target falls
     # outside its declared allowlist. Cheap, so it runs before the budget check.
@@ -744,7 +833,11 @@ def process_task(task, plan, spend, budget, dry_run, lock):
     # live: a $20 cap ran to $22.29 because 2-3 tasks were admitted concurrently off the same
     # stale spend snapshot). Reserving immediately makes each admission visible to the next
     # concurrent check; the reservation is reconciled against the real cost once known.
+    # `est` is recomputed fresh (reserved_estimate) at every stage below rather than fixed once
+    # per task — see the note above reserved_estimate() for why a single flat guess starves
+    # later-dispatched tasks.
     with lock:
+        est = reserved_estimate(spend, plan, "result")
         if spend["usd"] + est > budget:
             log(f"{tid}: SKIPPED — budget governor ({spend['usd']:.2f}+{est:.2f} > {budget:.2f})")
             wire_state(tid, task["persona"], "blocked")
@@ -775,6 +868,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
             raise
         with lock:
             spend["usd"] += cost - est   # reconcile: replace the reservation with the real cost
+            record_actual_cost(spend, cost, "result")
         if not ok:
             wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "no-result", "cost": cost}
@@ -784,6 +878,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         # A gap is a note on the outcome, not a block: tuner/heckler still own accept/reject.
         coverage_note = ""
         with lock:
+            est = reserved_estimate(spend, plan, "coverage")
             room = spend["usd"] + est <= budget
             if room:
                 spend["usd"] += est          # reserve atomically with the check — see note above
@@ -797,6 +892,7 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                 raise
             with lock:
                 spend["usd"] += ccost - est  # reconcile reservation against real cost
+                record_actual_cost(spend, ccost, "coverage")
             if gap:
                 log(f"{tid}: critic coverage gate flagged a gap — {coverage_note}")
         else:
@@ -805,26 +901,27 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         # Verify stage — spawn the configured verifiers, then GATE IN CODE.
         verify = task.get("verify", "single")
         verdicts = []
-        for i, (persona, kind) in enumerate(VERIFY_PLANS.get(verify, [])):
+        for i, (persona, verdict_kind) in enumerate(VERIFY_PLANS.get(verify, [])):
             with lock:
+                est = reserved_estimate(spend, plan, "verify")
                 if spend["usd"] + est > budget:
                     log(f"{tid}: verify {persona} SKIPPED — budget governor")
-                    verdicts.append((kind, "INCONCLUSIVE", None))
+                    verdicts.append((verdict_kind, "INCONCLUSIVE", None))
                     continue
                 spend["usd"] += est   # reserve atomically with the check — see note above
-            suffix = "verdict.md" if kind == "confirm" else "refute.md"
+            suffix = "verdict.md" if verdict_kind == "confirm" else "refute.md"
             label = f"{tid}.v{i}"
             vprompt = (f"Verify this claim from wire/{tid}.result.md. "
-                       f"{'Try to CONFIRM by independent execution' if kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
+                       f"{'Try to CONFIRM by independent execution' if verdict_kind=='confirm' else 'Try to REFUTE it (a different failure mode)'}. "
                        f"Tag your verdict executed/static. If you ran any command as evidence "
                        f"(grep, git show, running a test), quote it in a fenced "
                        f"```code block``` or on a line starting with `$ ` — the driver's "
                        f"evidence gate strongly prefers those two forms; a command mentioned only "
                        f"in prose risks being treated as no evidence at all, discarding your "
-                       f"verdict as INCONCLUSIVE even if you did the work." + context_brief_note())
+                       f"verdict as INCONCLUSIVE even if you did the work.")
             if dry_run:
                 dv = task.get("dry_verdict", "HOLDS")   # stub includes command evidence so it clears the gate
-                if kind == "confirm":
+                if verdict_kind == "confirm":
                     obs = "observed: matches" if dv == "HOLDS" else "observed: mismatch"
                     body = f"{dv}(executed)\n```\n$ ran the check\n{obs}\n```\n"
                 else:
@@ -850,14 +947,15 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                 raise
             with lock:
                 spend["usd"] += vcost - est   # reconcile reservation against real cost
+                record_actual_cost(spend, vcost, "verify")
             text = ""
             vpath = os.path.join(WIRE_DIR, f"{label}.{suffix}")
             if os.path.exists(vpath):
                 text = open(vpath, encoding="utf-8").read()
-            cv = classify(text, kind)
+            cv = classify(text, verdict_kind)
             if cv[0] == "INCONCLUSIVE" and re.search(r"\b(HOLDS|SURVIVES)\b", (text or "").upper()):
                 log(f"{label}: evidence gate vetoed a claimed pass (no logged command / placeholder) → INCONCLUSIVE")
-            verdicts.append((kind, *cv))
+            verdicts.append((verdict_kind, *cv))
 
         accepted, reason = decide([(k, v, t) for k, v, t in verdicts])
         wire_state(tid, task["persona"], "accepted" if accepted else "rejected")
@@ -1149,7 +1247,7 @@ def _main_body(args):
                  f"was set, or it didn't match --target-repo{'' if args.target_repo else ' — none was supplied on the CLI either'}). "
                  f"Aborting before spending budget on tasks that would run with no repo access.")
     budget = float(plan.get("budget_usd", 1e9))
-    spend = {"usd": 0.0}
+    spend = {"usd": 0.0, "n": 0, "sum_usd": 0.0}
     tasks = plan["tasks"]
 
     # Idempotent reruns keep wire/ (a fresh `clear` would archive away the very artifacts a
@@ -1292,10 +1390,11 @@ def _main_body(args):
     n_acc = sum(1 for r in results if r["outcome"] == "accepted")
     n_rej = sum(1 for r in results if r["outcome"] == "rejected")
     n_skip = sum(1 for r in results if r["outcome"] not in ("accepted", "rejected"))
+    n_budget_skip = sum(1 for r in results if r["outcome"] == "budget-skipped")
     print(f"\n\033[1mAchtopus run complete\033[0m")
     print(f"  accepted {n_acc}  rejected {n_rej}  skipped/blocked {n_skip}")
     print(f"  spend ${spend['usd']:.2f} / budget ${budget:.2f}"
-          + ("  \033[31m(governor engaged)\033[0m" if n_skip and spend['usd'] + plan.get('est_agent_usd',0.15) > budget else ""))
+          + ("  \033[31m(governor engaged)\033[0m" if n_budget_skip else ""))
     print(f"  coordination cost: $0.00 — no LLM in the loop (see docs/harness.md)")
 
     scorecard = tally_scorecard(results)

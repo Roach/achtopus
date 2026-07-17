@@ -1,6 +1,9 @@
 _archive/
 wire/*.md
 wire/.run.lock
+wire/.run_state.json
+wire/plan.json
+wire/cache/
 !wire/.gitkeep
 __pycache__/
 *.pyc
