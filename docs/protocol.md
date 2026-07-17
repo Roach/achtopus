@@ -11,11 +11,20 @@ know the state of the world.
 | `manifest.md` | scribe (and `bin/wire`) | The ledger — one fact per line, every task's owner + state |
 | `plan.md` | conductor | The shared plan: ordered steps with ids + acceptance checks |
 | `context.md` | composer | The one shared grounding brief (PRD read + diff inventory) every other arm reads instead of re-deriving |
+| `cache/diff.patch`, `cache/changed-files.txt`, `cache/pr.json` | `bin/run`'s zero-cost precompute (or composer, if the driver didn't already fetch it) | Raw diff/file-list/PR-metadata bytes, managed via `bin/cache get/set/fetch` — the literal content `context.md`'s summary can't substitute for when a reviewer needs to cite line numbers |
 | `<id>.result.md` | soloist / luthier | The deliverable/output for task `<id>` |
 | `<id>.coverage.md` | critic | Rubric-coverage gate on a domain result: `COVERAGE: complete` / `COVERAGE: gaps` (+ which rubric letters) |
 | `<id>.verdict.md` | tuner | Verify verdict: `HOLDS` / `FAILS` / `INCONCLUSIVE` |
 | `<id>.refute.md` | heckler | Refutation attempt: `REFUTED` / `SURVIVES` |
 | `_archive/<stamp>/` | `bin/wire clear` | Prior reviews, kept for the record |
+
+`bin/run` runs `bin/wire clear` (archiving the previous run's full `wire/` snapshot to
+`_archive/<stamp>/` first) at the start of any run that isn't reusing prior state — so a
+real run's actual findings are always recoverable from the most recent archive folder even
+after a later invocation (a `--dry-run` smoke test, a rerun with different tasks) has
+overwritten the live `wire/` files with different content. Idempotent reruns (see
+`docs/harness.md`'s budget-governor section) skip this for tasks being reused, so their
+artifacts survive untouched in the live `wire/` too.
 
 ## Task lifecycle
 

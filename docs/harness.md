@@ -111,10 +111,50 @@ it removes the LLM coordinator that the wire can't touch.
 fans out the personas via `claude -p` (persona body as the system prompt), captures each
 agent's `total_cost_usd`, and does the coordination in code:
 
-- **Budget governor** — refuses to spawn once `spend + est_agent_usd` would breach
+- **Budget governor** — refuses to spawn once `spend + reserved_estimate(...)` would breach
   `budget_usd`. Verified: with a tiny budget, later tasks are skipped and a task whose
   verifiers get starved falls to **INCONCLUSIVE → not accepted** — running out of money
   fails *safe*, never silently accepts unverified work.
+  - **Adaptive per-call-kind reservation.** The plan's flat `est_agent_usd` is only a
+    *starting* guess — real costs vary a lot by stage (a critic coverage-gate call often
+    runs under $1; a domain soloist result call can run $1-3), and a pessimistic flat
+    estimate reserves 3-4x more than most calls actually cost, starving later-dispatched
+    work even when real spend stays well under budget. `reserved_estimate()`/
+    `record_actual_cost()` track a running average **per call kind**
+    (`"result"|"coverage"|"verify"`, stored in `spend["kinds"]`) and switch a kind over to
+    `max(its own running average × 1.5, $0.05)` after just one real sample of that kind —
+    tracked per kind rather than globally so an expensive result-stage average doesn't drag
+    up the reservation for cheap coverage/verify calls, and trusted after one sample rather
+    than several so it matures fast even when 6 domain tasks dispatch simultaneously the
+    moment `brief` (the only task with no dependencies) clears. Live-canary validated:
+    baseline flat-estimate run (4 accepted/2 rejected/3 skipped, $17.01/$20) → a
+    single-global-average first attempt that made starvation *worse* (4/4/1, $19.01) →
+    the per-kind fix (5/2/2, $19.72), recovering past the baseline.
+  - **Spend resets per invocation, not per plan.** `bin/run` starts every invocation's
+    `spend`/adaptive averages at $0, and idempotent reruns (below) skip real dispatch for
+    already-`accepted`/`rejected` tasks entirely — so a top-up rerun at a higher
+    `--budget` only pays for the tasks a prior run's governor actually skipped, not the
+    prior run's full spend plus the new ceiling.
+- **Idempotent reruns** — `wire/.run_state.json` records each task's outcome + a content
+  fingerprint. Rerunning the same `plan.json` (without `--fresh`) reuses every already-
+  `accepted`/`rejected` task for free and only re-dispatches tasks that were
+  `budget-skipped`/`dep-skipped`/`scope-blocked` (nothing real ran for those) or whose
+  task content changed since its last verdict (fingerprint mismatch). This is what makes
+  "rerun at a higher budget to finish what the governor cut off" cheap: a run capped at
+  $25 that left 2 of 9 tasks budget-skipped, rerun with `--budget 30` and no `--fresh`,
+  cost **$2.45** — only the 2 unresolved tasks' real work, not a fresh 9-task pass.
+  `--dry-run` bypasses this (it treats every task as unresolved so the whole control flow
+  can be exercised for free) — note this means a `--dry-run` invocation overwrites
+  `wire/<id>.result.md` for every task with dry-run stub text, including tasks a prior
+  *real* run had already resolved; don't run `--dry-run` against a `wire/` you want to keep.
+- **Stale base-ref guard** — `precompute_context_cache()`'s zero-cost diff precompute tries
+  each `base_ref` candidate in order and skips one whose diff exceeds
+  `MAX_PRECOMPUTE_DIFF_BYTES` (5MB) rather than trusting it. A months-stale local
+  remote-tracking branch (e.g. an unfetched `origin/main`) can still resolve a merge-base
+  successfully while producing a diff of the *entire* intervening history instead of the
+  actual PR change — caching that as ground truth is worse than caching nothing, since
+  every downstream persona would review the wrong thing. Set a plan's `base_ref` explicitly
+  (e.g. `origin/dev`) when a repo's default branch isn't `main`/`master`.
 - **Programmatic gate** — `decide()` parses the `HOLDS/FAILS/INCONCLUSIVE` (+executed/static
   tier) and `SURVIVES/REFUTED` verdict files and applies the protocol rules (pair =
   unanimity, quorum = strict majority, INCONCLUSIVE never accepts) with no LLM in the
@@ -145,12 +185,18 @@ agent's `total_cost_usd`, and does the coordination in code:
   exposing *all* tools to a worker causes decision paralysis and token waste — is why each
   persona's `tools:` list in `.claude/agents/*.md` is deliberately narrow (the tuner/heckler
   get read/exec tools, not Write-everything). Keep new personas scoped.
-- **Model-slicing is opt-in, not assumed.** Every persona defaults to the same tier
-  (Sonnet 5) — the widely-adopted community pattern of a stronger supervisor model plus a
-  cheap tier (e.g. Haiku) for the worker fan-out is available, not automatic: set it via the
-  plan's `default_model` + per-task `model` override, or the driver's own `--model`
-  (task-execution tier) and `--premium-model` (conductor + scribe tier) flags. A uniform
-  default avoids quietly under-powering a domain that turns out to need real judgment.
+- **Model tier is now baked into the persona frontmatter, not left uniform.** Each
+  `.claude/agents/*.md`'s `model:` field sets its own default: `conductor` (orchestration)
+  and `tuner`/`heckler` (the adversarial verify pair judging correctness of load-bearing
+  claims) default to `opus`; `composer`/`soloist`/`luthier`/`critic`/`scribe`
+  (context-gathering, routine domain work, mechanical coverage checks, synthesis) default
+  to `sonnet` — matching the "frontier only for genuinely difficult work, Sonnet for
+  everyday work" principle from Webflow's AI-spend-discipline guidance (Slack, 2026-07-16).
+  `bin/run` doesn't read this frontmatter field itself (every task-execution persona runs
+  on the plan's `default_model` unless a task sets its own `model`, or `--model`/
+  `--premium-model` overrides it) — the frontmatter tier applies when a persona is invoked
+  directly via the Agent tool outside the driver. Override per run when the stakes call
+  for it; see `docs/patterns.md`'s "Pick the subagent model tier deliberately" lever.
 
 Run `bin/run examples/plan.example.json --dry-run` to exercise the whole control flow
 (accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost, or
