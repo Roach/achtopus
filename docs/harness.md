@@ -165,8 +165,13 @@ agent's `total_cost_usd`, and does the coordination in code:
   otherwise point isolation's `git -C <target_repo> worktree add` at an arbitrary path) — it's
   only honored if it matches the human-supplied `--target-repo` CLI flag exactly; otherwise
   isolation is disabled for that run rather than trusting the plan.
-- **Manifest ownership** — only the driver writes the manifest (`bin/wire status`); agents write
-  their own artifact to an absolute wire path and do no coordination.
+- **Manifest ownership (driver mode only)** — under `bin/run`, only the driver writes the
+  manifest (`bin/wire status`); agents write their own artifact to an absolute wire path and
+  do no coordination. This supersedes `docs/protocol.md`'s file table and the `scribe`
+  persona's own stated manifest-keeping duty, which describe **hand-run mode** (no driver,
+  personas run via the Agent tool and coordinate through the wire themselves) — the two modes
+  have different owners for the same file by design; see the `conductor` persona's
+  plan-authoring-vs-hand-run split for the same distinction.
 
 - **Plan authoring is the only coordination LLM call.** `bin/run --goal "<what to do>"`
   spawns the `conductor` once to author `wire/plan.json` (against a strict, driver-injected
@@ -185,18 +190,11 @@ agent's `total_cost_usd`, and does the coordination in code:
   exposing *all* tools to a worker causes decision paralysis and token waste — is why each
   persona's `tools:` list in `.claude/agents/*.md` is deliberately narrow (the tuner/heckler
   get read/exec tools, not Write-everything). Keep new personas scoped.
-- **Model tier is now baked into the persona frontmatter, not left uniform.** Each
-  `.claude/agents/*.md`'s `model:` field sets its own default: `conductor` (orchestration)
-  and `tuner`/`heckler` (the adversarial verify pair judging correctness of load-bearing
-  claims) default to `opus`; `composer`/`soloist`/`luthier`/`critic`/`scribe`
-  (context-gathering, routine domain work, mechanical coverage checks, synthesis) default
-  to `sonnet` — matching the "frontier only for genuinely difficult work, Sonnet for
-  everyday work" principle from Webflow's AI-spend-discipline guidance (Slack, 2026-07-16).
-  `bin/run` doesn't read this frontmatter field itself (every task-execution persona runs
-  on the plan's `default_model` unless a task sets its own `model`, or `--model`/
-  `--premium-model` overrides it) — the frontmatter tier applies when a persona is invoked
-  directly via the Agent tool outside the driver. Override per run when the stakes call
-  for it; see `docs/patterns.md`'s "Pick the subagent model tier deliberately" lever.
+- **Model tier is now baked into the persona frontmatter, not left uniform** — but `bin/run`
+  doesn't read that frontmatter field; it only applies when a persona is invoked directly via
+  the Agent tool outside the driver. See `docs/patterns.md`'s "Pick the subagent model tier
+  deliberately" lever for the actual tiers, what `--model`/`--premium-model`/a task's own
+  `model` field each do (and don't) reach under the driver, and the rationale.
 
 Run `bin/run examples/plan.example.json --dry-run` to exercise the whole control flow
 (accept / reject / auto-accept / budget-skip) with stubbed agents at zero API cost, or

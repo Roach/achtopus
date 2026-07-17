@@ -168,7 +168,7 @@ case "$cmd" in
 
   results)
     shopt -s nullglob
-    files=( "$WIRE"/*.result.md "$WIRE"/*.review.md "$WIRE"/*.verdict.md "$WIRE"/*.refute.md )
+    files=( "$WIRE"/*.result.md "$WIRE"/*.coverage.md "$WIRE"/*.verdict.md "$WIRE"/*.refute.md )
     if [ ${#files[@]} -eq 0 ]; then echo "(no result artifacts yet)"; else printf '%s\n' "${files[@]}"; fi
     ;;
 

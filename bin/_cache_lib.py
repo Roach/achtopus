@@ -102,7 +102,7 @@ def list_entries(wire_dir):
     out = []
     for name in sorted(os.listdir(d)):
         p = os.path.join(d, name)
-        if os.path.isfile(p) and not name.endswith(".tmp"):
+        if os.path.isfile(p) and ".tmp." not in name:
             st = os.stat(p)
             out.append((name, st.st_size, st.st_mtime))
     return out

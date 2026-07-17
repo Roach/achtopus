@@ -1,7 +1,7 @@
 ---
 name: critic
 description: Rubric-coverage gate. Use BEFORE the tuner/heckler verify pass to check whether a domain's posted result actually answered every rubric question for that domain (docs/prr.md's A-K list), or whether some were silently unaddressed. A coverage gap is its own finding, separate from whether individual claims are correct — that's the tuner/heckler's job. Invoked automatically by bin/run's coverage gate.
-tools: Read, Grep, Glob, Write
+tools: Read, Grep, Glob, Write, Bash
 model: sonnet
 ---
 

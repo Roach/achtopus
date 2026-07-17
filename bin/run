@@ -813,6 +813,32 @@ def record_actual_cost(spend, cost, kind):
     bucket[kind] = (n + 1, total + cost)
 
 
+def budgeted_call(spend, plan, budget, lock, kind, label, call):
+    """Reserve this `kind`'s estimate atomically with the admission check, invoke
+    `call(cap_usd) -> (real_cost, result)`, then reconcile the reservation against the real
+    cost and fold it into the adaptive per-kind average (see reserved_estimate()). Returns
+    `(real_cost, result)`, or None if even the estimate would exceed budget (call() never
+    runs). If call() raises, the reservation is undone before the exception propagates —
+    otherwise it would permanently inflate spend["usd"] with no matching real cost."""
+    with lock:
+        est = reserved_estimate(spend, plan, kind)
+        if spend["usd"] + est > budget:
+            log(f"{label}: SKIPPED — budget governor ({spend['usd']:.2f}+{est:.2f} > {budget:.2f})")
+            return None
+        spend["usd"] += est
+        cap = max(budget - spend["usd"], est)
+    try:
+        cost, result = call(cap)
+    except Exception:
+        with lock:
+            spend["usd"] -= est
+        raise
+    with lock:
+        spend["usd"] += cost - est
+        record_actual_cost(spend, cost, kind)
+    return cost, result
+
+
 def process_task(task, plan, spend, budget, dry_run, lock):
     tid = task["id"]
     model = task.get("model", plan.get("default_model", DEFAULT_MODEL))
@@ -826,23 +852,17 @@ def process_task(task, plan, spend, budget, dry_run, lock):
         return {"id": tid, "outcome": "scope-blocked", "reason": scope_reason, "cost": 0.0}
 
     # Budget governor — a HARD refusal, the thing prose never enforced.
-    # Reserve `est` atomically with the check (not just check-then-later-add-actual-cost):
-    # with concurrency > 1, several tasks can each check spend["usd"] against a still-stale
-    # value (none of the others' real cost has landed yet) and all pass, then all spend their
-    # real cost, overshooting budget by however many tasks were admitted in that window (seen
-    # live: a $20 cap ran to $22.29 because 2-3 tasks were admitted concurrently off the same
-    # stale spend snapshot). Reserving immediately makes each admission visible to the next
+    # Every stage below reserves its estimate atomically with the admission check via
+    # budgeted_call() (not just check-then-later-add-actual-cost): with concurrency > 1,
+    # several tasks can each check spend["usd"] against a still-stale value (none of the
+    # others' real cost has landed yet) and all pass, then all spend their real cost,
+    # overshooting budget by however many tasks were admitted in that window (seen live: a
+    # $20 cap ran to $22.29 because 2-3 tasks were admitted concurrently off the same stale
+    # spend snapshot). Reserving immediately makes each admission visible to the next
     # concurrent check; the reservation is reconciled against the real cost once known.
-    # `est` is recomputed fresh (reserved_estimate) at every stage below rather than fixed once
-    # per task — see the note above reserved_estimate() for why a single flat guess starves
-    # later-dispatched tasks.
-    with lock:
-        est = reserved_estimate(spend, plan, "result")
-        if spend["usd"] + est > budget:
-            log(f"{tid}: SKIPPED — budget governor ({spend['usd']:.2f}+{est:.2f} > {budget:.2f})")
-            wire_state(tid, task["persona"], "blocked")
-            return {"id": tid, "outcome": "budget-skipped", "cost": 0.0}
-        spend["usd"] += est
+    # The estimate is recomputed fresh (reserved_estimate) for every call rather than fixed
+    # once per task — see the note above reserved_estimate() for why a single flat guess
+    # starves later-dispatched tasks.
 
     # cwd/worktree/system were already resolved by preflight_roll_call() (dry runs skip it, so
     # these keys are absent and we fall back to the old defaults). Its roll-call cost is
@@ -855,60 +875,36 @@ def process_task(task, plan, spend, budget, dry_run, lock):
     try:
         wire_state(tid, task["persona"], "claimed")
         dry = {"body": f"{tid} result (dry-run stub)\n", "cost": 0.05} if dry_run else None
-        with lock:
-            headroom = max(budget - spend["usd"], est)
-        try:
-            cost, ok = run_agent(task["persona"], task["prompt"], tid, "result.md", model, cwd, dry,
-                                  max_usd=headroom, precomputed=precomputed)
-        except Exception:
-            # An exception here (not a normal ok=False) means the reservation below would never
-            # get reconciled, permanently inflating spend["usd"] — undo it before propagating.
-            with lock:
-                spend["usd"] -= est
-            raise
-        with lock:
-            spend["usd"] += cost - est   # reconcile: replace the reservation with the real cost
-            record_actual_cost(spend, cost, "result")
+        res = budgeted_call(spend, plan, budget, lock, "result", tid, lambda cap: run_agent(
+            task["persona"], task["prompt"], tid, "result.md", model, cwd, dry,
+            max_usd=cap, precomputed=precomputed))
+        if res is None:
+            wire_state(tid, task["persona"], "blocked")
+            return {"id": tid, "outcome": "budget-skipped", "cost": 0.0}
+        cost, ok = res
         if not ok:
             wire_state(tid, task["persona"], "blocked")
             return {"id": tid, "outcome": "no-result", "cost": cost}
         wire_state(tid, task["persona"], "done")
 
-        # Coverage gate — critic checks rubric coverage BEFORE tuner/heckler verify.
-        # A gap is a note on the outcome, not a block: tuner/heckler still own accept/reject.
+        # Coverage gate — critic checks rubric coverage BEFORE tuner/heckler verify. A gap is
+        # a note on the outcome, not a block: tuner/heckler still own accept/reject. Skipped
+        # entirely for verify:none tasks — there's no downstream verify pass for a coverage
+        # gap to feed into, so the check would just spend budget with no consumer.
+        verify = task.get("verify", "single")
         coverage_note = ""
-        with lock:
-            est = reserved_estimate(spend, plan, "coverage")
-            room = spend["usd"] + est <= budget
-            if room:
-                spend["usd"] += est          # reserve atomically with the check — see note above
-                ccap = max(budget - spend["usd"], est)
-        if room:
-            try:
-                ccost, gap, coverage_note = run_coverage_gate(task, model, dry_run, max_usd=ccap)
-            except Exception:
-                with lock:
-                    spend["usd"] -= est
-                raise
-            with lock:
-                spend["usd"] += ccost - est  # reconcile reservation against real cost
-                record_actual_cost(spend, ccost, "coverage")
-            if gap:
-                log(f"{tid}: critic coverage gate flagged a gap — {coverage_note}")
-        else:
-            log(f"{tid}: critic coverage gate SKIPPED — budget governor")
+        if verify != "none":
+            cres = budgeted_call(spend, plan, budget, lock, "coverage", f"{tid} critic coverage gate",
+                                  lambda cap: (lambda r: (r[0], (r[1], r[2])))(
+                                      run_coverage_gate(task, model, dry_run, max_usd=cap)))
+            if cres is not None:
+                _, (gap, coverage_note) = cres
+                if gap:
+                    log(f"{tid}: critic coverage gate flagged a gap — {coverage_note}")
 
         # Verify stage — spawn the configured verifiers, then GATE IN CODE.
-        verify = task.get("verify", "single")
         verdicts = []
         for i, (persona, verdict_kind) in enumerate(VERIFY_PLANS.get(verify, [])):
-            with lock:
-                est = reserved_estimate(spend, plan, "verify")
-                if spend["usd"] + est > budget:
-                    log(f"{tid}: verify {persona} SKIPPED — budget governor")
-                    verdicts.append((verdict_kind, "INCONCLUSIVE", None))
-                    continue
-                spend["usd"] += est   # reserve atomically with the check — see note above
             suffix = "verdict.md" if verdict_kind == "confirm" else "refute.md"
             label = f"{tid}.v{i}"
             vprompt = (f"Verify this claim from wire/{tid}.result.md. "
@@ -931,23 +927,18 @@ def process_task(task, plan, spend, budget, dry_run, lock):
                 dry = {"body": body, "cost": 0.03}
             else:
                 dry = None
-            with lock:
-                vcap = max(budget - spend["usd"], est)
             # Verify runs in the SAME cwd as the task it's checking (worktree or REPO_ROOT) —
             # a verifier told to "confirm by independent execution" against a target repo can't
             # do that if it's sandboxed to the achtopus repo while the task it's verifying was
             # isolated elsewhere. Seen live: an isolated task produced a good result, but its
             # tuner verdict came back INCONCLUSIVE because it had no filesystem access to the
             # repo it was asked to independently re-derive facts from.
-            try:
-                vcost, vok = run_agent(persona, vprompt, label, suffix, model, cwd, dry, max_usd=vcap)
-            except Exception:
-                with lock:
-                    spend["usd"] -= est
-                raise
-            with lock:
-                spend["usd"] += vcost - est   # reconcile reservation against real cost
-                record_actual_cost(spend, vcost, "verify")
+            vres = budgeted_call(spend, plan, budget, lock, "verify", f"{tid}: verify {persona}",
+                                  lambda cap: run_agent(persona, vprompt, label, suffix, model, cwd, dry, max_usd=cap))
+            if vres is None:
+                verdicts.append((verdict_kind, "INCONCLUSIVE", None))
+                continue
+            vcost, vok = vres
             text = ""
             vpath = os.path.join(WIRE_DIR, f"{label}.{suffix}")
             if os.path.exists(vpath):
@@ -1247,7 +1238,7 @@ def _main_body(args):
                  f"was set, or it didn't match --target-repo{'' if args.target_repo else ' — none was supplied on the CLI either'}). "
                  f"Aborting before spending budget on tasks that would run with no repo access.")
     budget = float(plan.get("budget_usd", 1e9))
-    spend = {"usd": 0.0, "n": 0, "sum_usd": 0.0}
+    spend = {"usd": 0.0}
     tasks = plan["tasks"]
 
     # Idempotent reruns keep wire/ (a fresh `clear` would archive away the very artifacts a

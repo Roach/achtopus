@@ -131,9 +131,16 @@ Levers, roughly in order of impact:
   default to `sonnet`; `conductor` (orchestration/decomposition) and `tuner`/`heckler`
   (the adversarial verify pair judging correctness of load-bearing claims) stay on `opus`
   — matching the "frontier only for genuinely difficult work, Sonnet for everyday work"
-  principle from Webflow's AI-spend-discipline guidance (Slack, 2026-07-16). Override per
-  task via `bin/run`'s `--model`/`--premium-model` flags or a task's own `model` field when
-  a specific run's stakes call for it.
+  principle from Webflow's AI-spend-discipline guidance (Slack, 2026-07-16). Note the
+  frontmatter tier only takes effect when a persona is invoked directly via the Agent tool
+  — `bin/run` never reads it; every task-execution persona (including the tuner/heckler
+  verify pair) runs on the plan's `default_model` (or a task's own `model` field) unless
+  `--model` overrides it, and `--model` moves every task uniformly, not just the verify
+  pair. `--premium-model` is separate and narrower: it only sets the tier for the
+  conductor's plan-authoring call and the scribe's final synthesis, never task execution
+  or verify. To run the verify pair on a stronger tier *under the driver*, set `"model"`
+  on the tuner/heckler-triggering tasks in the plan directly (or on all tasks via
+  `--model`) — there is no flag that targets "just the hard judgment steps" today.
 - **Dedup before you fan out.** Overlapping task scopes pay two agents to cover the same
   code and then cost you a manual reconcile. The conductor's pre-fanout overlap check
   (step 1a) exists to avoid this.
