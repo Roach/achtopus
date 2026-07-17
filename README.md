@@ -13,7 +13,7 @@ whole review is the octopus's eight arms coordinating through a shared, greppabl
 **wire**, so a human can always reconstruct what was checked, what was challenged, and why the
 gate opened or held.
 
-<img width="700" alt="achtopus" src="https://github.com/user-attachments/assets/c2afb163-8d4e-4ab0-b48f-b48453adada6" />
+<img width="700" alt="achtopus" src="https://github.com/user-attachments/assets/db97707b-ccd1-4356-bca1-439f3f74ee33" />
 
 
 ## Why a PRR needs this
